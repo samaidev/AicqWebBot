@@ -79,7 +79,7 @@
     ag_opencode_model: 'Model (free models work anonymously)',
     ag_opencode_custom_model: 'Custom model ID',
     ag_opencode_key_hint: 'API Key optional — leave blank for anonymous free access (rate-limited). Fill a Zen key for paid models / higher limits.',
-    ag_opencode_free_note: 'Free anonymous models (live-verified 2026-09): nemotron-3-ultra / nemotron-3.5-lightning / ling-3.0-flash-fin (chat/completions), muse-spark-1.3 (responses, region-locked in some regions). Streaming + tool calling work out of the box; free models are text-only. The catalog auto-syncs from GET /models and dead upstream models are filtered; if one still errors, the engine auto-fails-over to another free model.',
+    ag_opencode_free_note: 'Free anonymous models (live-verified 2026-09): nemotron-3-ultra / nemotron-3.5-lightning / ling-3.0-flash-fin (chat/completions), muse-spark-1.3 (responses — usually requires a real Zen key; region-locked in some regions). Streaming + tool calling work out of the box; free models are text-only. The catalog auto-syncs from GET /models and dead upstream models are filtered; if one still errors, the engine auto-fails-over to another free model.',
     ag_compat_mode: 'Compat Mode (no function calling)',
     ag_compat_hint: 'For API proxies without OpenAI function calling support. Symptom: test passes but chat gets 503/400 → check this.',
     ag_accum_desc: '<strong>Chat-Accumulation Mode:</strong><br>• Session ID auto-managed, no manual input needed<br>• Three-phase send: ①system prompt → ②tools list → ③user message, avoids token limits<br>• Tool calls use <code>&lt;tool_call&gt;</code> text format (no tools parameter)<br>• For OpenAI-compatible APIs with session accumulation (e.g. one-api/new-api forwarding to scnet)',
@@ -313,7 +313,7 @@
     { id: 'nemotron-3.5-lightning-free', label: 'Nemotron 3.5 Lightning (Free)' },
     { id: 'ling-3.0-flash-fin-free',     label: 'Ling 3.0 Flash Fin (Free)' },
     { id: 'mimo-v2.5-free',              label: 'MiMo-V2.5 (Free, rate-limited sometimes)' },
-    { id: 'muse-spark-1.3-contributor-free', label: 'Muse Spark 1.3 Contributor (Free, region-locked in some regions)' },
+    { id: 'muse-spark-1.3-contributor-free', label: 'Muse Spark 1.3 Contributor (Zen key usually required; region-locked)' },
   ];
   const OC_DEFAULT_BASE = 'https://opencode.ai/zen/v1';
   const ocApiTypeFor = (m) => /^(gpt-|grok-|muse-spark-)/.test(m || '') ? 'response' : 'openai-completion';
@@ -589,10 +589,19 @@
   // GitHub Pages, any CDN) there is no local relay — /healthz will not
   // return JSON. In that mode we shim fetch so the UNMODIFIED engine's
   // proxy calls resolve client-side:
-  //   llm-proxy    -> direct connect to the model API (BYOK, CORS-aware)
+  //   llm-proxy    -> aicq.me PUBLIC RELAY (keyless, rate-limited, CORS-open)
+  //                   for opencode.ai targets — their API sends no CORS
+  //                   headers so the browser can never read it directly;
+  //                   other OpenAI-compatible endpoints connect directly
+  //                   (BYOK; CORS-open providers work out of the box)
   //   search-proxy -> DuckDuckGo Instant Answer API (CORS-open)
   //   web-proxy    -> direct fetch (gracefully degrades when CORS blocks)
   const RealFetch = window.fetch.bind(window);
+
+  // Public relay on aicq.me: protocol identical to /api/v1/agent/llm-proxy,
+  // but keyless and restricted to opencode.ai upstreams. CORS-open.
+  const PUBLIC_RELAY_URL = 'https://aicq.me/api/v1/public/llm-relay';
+  const OC_HOST_RE = /^https:\/\/([a-z0-9-]+\.)*opencode\.ai\//i;
 
   function jsonResp(obj, status) {
     return Promise.resolve(new Response(JSON.stringify(obj),
@@ -604,18 +613,29 @@
       let p;
       try { p = JSON.parse(init && init.body || '{}'); }
       catch (e) { return jsonResp({ error: 'bad proxy request: ' + e }, 400); }
+      const target = String(p.target_url || '');
+      // 1) opencode.ai sends no CORS headers — relay through aicq.me's public
+      //    relay (keyless for free models, BYOK key inside the body for paid).
+      if (OC_HOST_RE.test(target)) {
+        try {
+          return await RealFetch(PUBLIC_RELAY_URL, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(p),
+          });
+        } catch (e) { /* relay unreachable — fall through to direct */ }
+      }
+      // 2) everything else connects directly (BYOK; CORS-open providers work)
       try {
-        return await RealFetch(p.target_url, {
+        return await RealFetch(target, {
           method: p.method || 'POST', headers: p.headers || {}, body: p.body,
         });
       } catch (e) {
-        // Direct connect failed — almost always browser CORS (e.g. opencode.ai
-        // sends no Access-Control-Allow-Origin). Be honest about the shape:
-        // the local relay (pip form) has no such limitation.
+        // Direct connect failed — almost always browser CORS. Be honest:
         const hint = 'Direct browser connection blocked (CORS or offline). '
-          + 'Free OpenCode models need the local relay — pip install aicqwebbot, '
-          + 'then aicqwebbot.run(8386) — or point an OpenAI-compatible key at a '
-          + 'CORS-open endpoint (works directly here).';
+          + 'Free OpenCode models are relayed via aicq.me (public relay); if that '
+          + 'failed too it may be rate-limited — retry in a minute, or run your own '
+          + 'relay: pip install aicqwebbot, then aicqwebbot.run(8386).';
         return jsonResp({ error: hint }, 502);
       }
     }
@@ -653,13 +673,13 @@
       if (!ok) {
         window.__STATIC_MODE = true;
         window.fetch = shimProxy;
-        console.log('[AicqWebBot] static mode: no local relay — LLM calls connect directly (BYOK)');
+        console.log('[AicqWebBot] static mode: no local relay — free OpenCode models go through the aicq.me public relay, BYOK endpoints connect directly');
       }
     })
     .catch(() => {
       window.__STATIC_MODE = true;
       window.fetch = shimProxy;
-      console.log('[AicqWebBot] static mode (no relay reachable): direct LLM connections enabled');
+      console.log('[AicqWebBot] static mode (no relay reachable): free models via aicq.me public relay, BYOK direct');
     })
     .finally(() => { window.__modeReady = true; });
 })();

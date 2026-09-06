@@ -77,9 +77,11 @@ body {
 
 /* ─── Chat ─── */
 #chatHead {
-  display: flex; align-items: center; gap: 12px; padding: 10px 16px;
+  display: flex; align-items: center; gap: 12px; padding: 10px 64px 10px 16px;
   background: var(--panel); border-bottom: 1px solid var(--border); flex-shrink: 0;
 }
+/* 右侧 64px 留白：给悬浮的主题切换按钮（fixed top:14 right:14）让位，
+   否则它正好压在 ➕ 新会话按钮上把点击吞掉 */
 #chatHead button {
   background: var(--card); border: 1px solid var(--border); color: var(--text);
   width: 34px; height: 34px; border-radius: 9px; cursor: pointer; font-size: 16px;

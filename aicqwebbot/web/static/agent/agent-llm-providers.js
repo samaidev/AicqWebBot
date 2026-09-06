@@ -25,7 +25,7 @@ const OPENCODE_MODELS = {
     { id: 'mimo-v2.5-free',              label: 'MiMo-V2.5 (Free, rate-limited sometimes)' }
   ],
   'response': [
-    { id: 'muse-spark-1.3-contributor-free', label: 'Muse Spark 1.3 Contributor (Free, region-locked in some regions)' },
+    { id: 'muse-spark-1.3-contributor-free', label: 'Muse Spark 1.3 Contributor (Zen key usually required; region-locked in some regions)' },
     { id: 'gpt-5.4-nano',                    label: 'GPT 5.4 Nano (needs API Key)' },
     { id: 'gpt-5.4-mini',                    label: 'GPT 5.4 Mini (needs API Key)' },
     { id: 'grok-build-0.1',                  label: 'Grok Build 0.1 (needs API Key)' }

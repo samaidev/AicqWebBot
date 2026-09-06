@@ -163,6 +163,13 @@
   const UI = {
     cs: 'cs_' + Date.now(),
     currentStream: null,   // {el, textEl, statusEl, streamId, reasoningEl}
+    // [2026-09-06] 本次回复已渲染节点的登记表：
+    //   replyNodes  — 本次回复产生过的所有 DOM 节点（文本气泡 + 工具卡）
+    //   replyTools  — 已渲染过卡片的 tool_call id 集合
+    // stream_end 到达时若带权威 content_order，则把本次回复整体拆除重放，
+    // 保证「文本→工具卡→文本」顺序正确且不重复（修复末尾气泡被全量拼接覆盖的缺陷）。
+    replyNodes: [],
+    replyTools: new Set(),
 
     esc(s) {
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
@@ -197,6 +204,7 @@
       wrap.appendChild(reasoning); wrap.appendChild(body); wrap.appendChild(status);
       $('msgFlow').appendChild(wrap);
       this.currentStream = { wrap, reasoning, body, status, text: '', streamId: null, done: false };
+      this.replyNodes.push(wrap);   // 登记进本次回复的节点表
       return this.currentStream;
     },
 
@@ -225,6 +233,8 @@
         const card = Tools.card(d);
         $('msgFlow').appendChild(card.el);
         Tools.byId[d.id] = card;
+        this.replyNodes.push(card.el);              // 卡片也登记进本次回复
+        if (d.id) this.replyTools.add(d.id);
         this.currentStream = null;   // next text chunk starts a fresh bubble
         this.scroll();
       } else if (t === 'tool_result' && d && typeof d === 'object') {
@@ -248,14 +258,53 @@
     onEnd(msg) {
       if (msg.chat_session_id && msg.chat_session_id !== this.cs) return;
       const st = this.currentStream;
-      if (st) {
-        st.status.classList.add('hidden');
-        // prefer authoritative segments from stream_end
+      if (st) st.status.classList.add('hidden');
+
+      // [2026-09-06] 权威重放：stream_end 带 content_order（text/tool 顺序）时，
+      // 把本次回复已渲染的节点整体拆除，按权威顺序重建：
+      //   • 文本段独立成泡（不再全量拼接进最后一个泡 — 修复重复渲染缺陷）
+      //   • 工具卡必现：即使 tool_call 实时帧丢失/未渲染，也由 tool_calls 数据补齐
+      //     （含命令参数 input 与返回结果 result）
+      const order = Array.isArray(msg.content_order) ? msg.content_order : [];
+      const segs = Array.isArray(msg.text_segments) ? msg.text_segments : [];
+      const calls = Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+      if (order.length > 1 && (segs.length || calls.length)) {
+        // 拆除本次回复已渲染的节点（气泡/卡片），保留 reasoning（挂在第一个气泡上）
+        const reasoning = st ? st.reasoning : null;
+        for (const n of this.replyNodes) n.remove();
+        this.replyNodes = []; this.replyTools.clear();
+        let ti = 0, ci = 0;
+        for (const kind of order) {
+          if (kind === 'text' && ti < segs.length) {
+            const seg = segs[ti++];
+            const wrap = document.createElement('div');
+            wrap.className = 'msg agent';
+            if (reasoning && !reasoning.isConnected) { wrap.appendChild(reasoning); }
+            const body = document.createElement('div');
+            body.innerHTML = this.md(String(seg || ''));
+            wrap.appendChild(body);
+            $('msgFlow').appendChild(wrap);
+          } else if (kind === 'tool' && ci < calls.length) {
+            const tc = calls[ci++];
+            if (!tc) continue;
+            const card = Tools.card({ name: tc.name || 'tool', input: tc.input || {}, id: tc.id || ('tc_missing_' + ci) });
+            const ok = tc.success !== false && !tc.error;
+            card.stateEl.textContent = ok ? '✓' : '✗';
+            card.stateEl.className = 'tc-state ' + (ok ? 'ok' : 'err');
+            const out = card.body.querySelector('.tc-out');
+            if (out) out.innerHTML = `<b>📤 output — result</b>\n${UI.esc(String(tc.result || tc.error || '').slice(0, 4000))}`;
+            $('msgFlow').appendChild(card.el);
+            if (tc.id) Tools.byId[tc.id] = card;
+          }
+        }
+      } else if (st) {
+        // 简单路径（纯文本回复）：沿用权威 text_segments
         if (Array.isArray(msg.text_segments) && msg.text_segments.length) {
           st.body.innerHTML = msg.text_segments.map(s => this.md(s)).join('');
         }
-        this.currentStream = null;
       }
+      this.replyNodes = []; this.replyTools.clear();
+      this.currentStream = null;
       this.scroll();
     },
 
@@ -267,6 +316,7 @@
     reset() {
       $('msgFlow').innerHTML = '';
       this.currentStream = null;
+      this.replyNodes = []; this.replyTools.clear();
     }
   };
 
@@ -701,6 +751,16 @@
       const cfg = id ? await AgentStorage.getConfig(id) : null;
       if (cfg && cfg.llm_config) {
         await startChat(cfg);
+        // [2026-09-06] 刷新后自动恢复最近会话（含工具卡片与结果重放）——
+        // 用户不再面对空白聊天页误以为「数据没存 / 没有 indexdb」。
+        // 恢复即续聊：UI.cs 切回该会话 id，引擎按此加载历史上下文。
+        try {
+          const sessions = await AgentStorage.listSessions(cfg.agent_id);
+          if (sessions && sessions.length) {
+            await loadHistorySession(sessions[0].session_id);
+            console.log('[AicqWebBot] last session auto-restored:', sessions[0].session_id);
+          }
+        } catch (e) { console.warn('[AicqWebBot] auto-restore failed:', e); }
       } else {
         await showSetup(null);
       }

@@ -24,6 +24,15 @@ from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 
+try:                                   # source tree → __version__; PyPI wheel → metadata
+    from . import __version__ as PKG_VERSION
+except Exception:                      # pragma: no cover — flat import fallback
+    try:
+        from importlib.metadata import version as _pkg_version
+        PKG_VERSION = _pkg_version("aicqwebbot")
+    except Exception:
+        PKG_VERSION = "dev"
+
 app = FastAPI(title="AicqWebBot", docs_url=None, redoc_url=None)
 
 WEB_DIR = Path(__file__).parent / "web"
@@ -242,6 +251,18 @@ async def web_proxy(request: Request):
 app.mount("/static", StaticFiles(directory=str(WEB_DIR / "static")), name="static")
 
 
+# [2026-09-06] 防陈旧壳：shell 资源（index.html / app.js / app.css）必须每次刷新
+# 向服务器重新验证，否则浏览器可能继续跑旧版 UI（用户看不到新功能还以为没实现）。
+# bundle 文件走 AGENT_VER=Date.now() 动态参数，本身不缓存；这里兜底 index 与 /static。
+@app.middleware("http")
+async def _no_shell_cache(request: Request, call_next):
+    resp = await call_next(request)
+    p = request.url.path
+    if p == "/" or p.endswith(".html") or p.startswith("/static/"):
+        resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    return resp
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index():
     return FileResponse(str(WEB_DIR / "index.html"))
@@ -249,4 +270,4 @@ async def index():
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "version": "0.3.1"}
+    return {"ok": True, "version": PKG_VERSION}

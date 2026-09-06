@@ -14,7 +14,7 @@
 # The agent brain (LLM loop, tool calls, WASM sandbox, memory) runs
 # ENTIRELY in your browser. The local server is a thin stateless relay.
 
-__version__ = "0.4.0"
+__version__ = "0.4.1"
 
 _BANNER = r"""
   ╔══════════════════════════════════════════════════════╗

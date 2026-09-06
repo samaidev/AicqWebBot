@@ -160,8 +160,13 @@ const AgentStorage = {
   async addConversation(agentId, sessionId, role, content, toolCalls, toolCallId) {
     await this.init();
     if (!this._db) return;
+    // [2026-09-07] id 单调有序：同毫秒内连续写入（如 assistant.tool_calls → tool.result）
+    // 用自增序号保证后写的 id 字典序更大 —— getConversations 按 created_at 排序遇到
+    // 同毫秒并列时稳定排序依赖主键序（getAll 索引同键按主键返回），随机后缀会把
+    // 工具结果排到工具调用之前，破坏重放与 LLM 上下文顺序。
+    AgentStorage._idSeq = ((AgentStorage._idSeq || 0) + 1) % 10000;
     const msg = {
-      id: `${agentId}_${sessionId}_${Date.now()}_${Math.random().toString(36).slice(2,8)}`,
+      id: `${agentId}_${sessionId}_${Date.now()}_${String(AgentStorage._idSeq).padStart(4, '0')}_${Math.random().toString(36).slice(2, 8)}`,
       agent_id: agentId,
       session_id: sessionId,
       role, content, tool_calls: toolCalls || null,
@@ -216,6 +221,33 @@ const AgentStorage = {
       };
       req.onerror = () => resolve([]);
     });
+  },
+
+  // [2026-09-07] 删除整个会话：agent_conversations 全部行（按 agent_session 索引游标删）
+  // + agent_sessions 游标行（cuttime）。供历史会话面板的 🗑 删除按钮调用。
+  // 返回 true = 两条删除事务都成功。
+  async deleteSession(agentId, sessionId) {
+    await this.init();
+    if (!this._db || !agentId || !sessionId) return false;
+    const delMsgs = new Promise((resolve) => {
+      const tx = this._db.transaction('agent_conversations', 'readwrite');
+      const idx = tx.objectStore('agent_conversations').index('agent_session');
+      const req = idx.openCursor(IDBKeyRange.only([agentId, sessionId]));
+      req.onsuccess = (e) => {
+        const cur = e.target.result;
+        if (cur) { cur.delete(); cur.continue(); }
+      };
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+    const delRow = new Promise((resolve) => {
+      const tx = this._db.transaction('agent_sessions', 'readwrite');
+      tx.objectStore('agent_sessions').delete(this._sessionKey(agentId, sessionId));
+      tx.oncomplete = () => resolve(true);
+      tx.onerror = () => resolve(false);
+    });
+    const [a, b] = await Promise.all([delMsgs, delRow]);
+    return !!(a && b);
   },
 
   async getConversations(agentId, sessionId, limit = 50) {

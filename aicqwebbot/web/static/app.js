@@ -109,7 +109,85 @@
     ag_delete: 'Delete Agent',
     ag_delete_confirm: 'Delete this agent? ALL local data (config, virtual FS, history, memory) will be permanently deleted.',
     ag_deleted: 'Agent deleted',
-    ag_close: 'Close'
+    ag_close: 'Close',
+    // [2026-09-07] Settings tabs / ClawHub / LLM log / File manager — EN strings
+    // consumed by agent-settings.js / agent-files.js via the _T(key, enFallback) helper
+    ag_settings_title: 'Settings',
+    ag_tab_prompt: 'Prompt',
+    ag_tab_llm: 'LLM Config',
+    ag_tab_tools: 'Tools',
+    ag_tab_llmlog: 'LLM Log',
+    ag_tab_data: 'Data',
+    ag_select_all: 'Select All',
+    ag_deselect_all: 'Deselect All',
+    ag_clawhub_search_label: 'Search ClawHub Skills',
+    ag_clawhub_search_ph: 'Search skills...',
+    ag_search_btn: 'Search',
+    ag_installed_skills: 'Installed Skills',
+    ag_refresh: 'Refresh',
+    ag_clear: 'Clear',
+    ag_err_502_hint: ' — proxy cannot reach the LLM API (DNS/network/TLS)',
+    ag_err_auth_hint: ' — auth failed: check API Key or Cookie',
+    ag_err_404_hint: ' — URL not found: check base_url',
+    ag_detail_label: 'Detail: ',
+    ag_empty_response: '(empty response)',
+    ag_searching: 'Searching...',
+    ag_no_skills: 'No skills found',
+    ag_install: 'Install',
+    ag_install_ok: 'installed successfully',
+    ag_search_failed: 'Search failed: ',
+    ag_install_failed: 'Install failed: ',
+    ag_no_installed_skills: 'No skills installed yet',
+    ag_uninstall: 'Uninstall',
+    ag_skill_uninstalled: 'Skill uninstalled',
+    ag_no_data: 'No data to export',
+    ag_log_module_failed: 'Log module load failed: ',
+    ag_log_summary: 'Last {n} entries (cap 100, oldest auto-evicted)',
+    ag_log_empty_hint: 'No logs yet — every LLM call is recorded here automatically after you chat with the agent',
+    ag_log_empty1: '📭 No LLM call logs yet',
+    ag_log_empty2: 'Send the agent a message — model / latency / tokens / input & output get recorded here in real time',
+    ag_log_row_title: 'Click to view full input/output',
+    ag_log_time: 'Time',
+    ag_log_model: 'Model',
+    ag_log_clear_confirm: 'Clear all LLM call logs?',
+    ag_log_no_input: '(no input recorded)',
+    ag_log_no_output: '(empty)',
+    ag_log_detail_title: 'LLM Call Detail',
+    ag_log_input: 'Input',
+    ag_log_msgs: 'messages',
+    ag_log_output: 'Output',
+    ag_fs_root: 'Root',
+    ag_fs_title: 'File Manager',
+    ag_fs_upload: 'Upload',
+    ag_fs_keys: 'Keys',
+    ag_fs_empty: 'Empty directory',
+    ag_fs_empty_hint: 'Click "Upload" to add files, or ask the agent to create files with the exec-code / edit-file tools',
+    ag_fs_name: 'Name',
+    ag_fs_size: 'Size',
+    ag_fs_mtime: 'Modified',
+    ag_fs_actions: 'Actions',
+    ag_fs_open: 'Open / preview',
+    ag_fs_preview_img: 'Preview image',
+    ag_fs_download: 'Download',
+    ag_fs_delete: 'Delete',
+    ag_fs_not_found: 'File not found',
+    ag_fs_src_trunc: 'Source too long — showing first 200k chars only; download to view the full text',
+    ag_fs_render: 'Rendered',
+    ag_fs_source: 'Source',
+    ag_fs_newtab: 'New tab',
+    ag_fs_newtab_title: 'Open fully in a new browser tab',
+    ag_fs_no_preview: 'Preview not supported for .{ext} — download to view',
+    ag_fs_html_unavail: 'HTML content unavailable',
+    ag_fs_downloaded: 'Downloaded: ',
+    ag_fs_del_confirm: 'Delete {name}?',
+    ag_fs_deleted: 'Deleted: ',
+    ag_fs_uploaded: 'Uploaded: {name} ({kb}KB)',
+    ag_fs_identity: 'Agent Identity',
+    ag_fs_show: 'Show',
+    ag_fs_hide: 'Hide',
+    ag_fs_copy: 'Copy',
+    ag_fs_llm_cfg: 'LLM Config',
+    ag_fs_copied: 'Copied'
   };
   window.t = (k) => AG_I18N[k] || k;
 
@@ -659,6 +737,7 @@
           <div class="hist-row" data-sid="${UI.esc(s.session_id)}">
             <div class="hist-title">${UI.esc(s.title || '(no text)')}</div>
             <div class="hist-meta">${s.message_count} msgs · ${fmt(s.last_at)} · <code>${UI.esc(s.session_id.slice(0, 13))}</code></div>
+            <button class="hist-del" data-del="${UI.esc(s.session_id)}" title="Delete this session">🗑</button>
           </div>`).join('')
       : '<p style="color:var(--muted);font-size:13px;padding:8px 0">No sessions yet. Start chatting — every session is stored locally in your browser (IndexedDB) and listed here.</p>';
 
@@ -679,6 +758,33 @@
     modal.querySelector('#btnHistClose').onclick = () => modal.remove();
     modal.querySelectorAll('.hist-row').forEach(row => {
       row.addEventListener('click', () => loadHistorySession(row.dataset.sid));
+    });
+    // [2026-09-07] Per-session delete: 🗑 removes the whole session from IndexedDB
+    // (agent_conversations rows + agent_sessions cuttime row). If the deleted
+    // session is the one currently open, the chat resets to a fresh session.
+    modal.querySelectorAll('.hist-del').forEach(btn => {
+      btn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const sid = btn.dataset.del;
+        if (!sid) return;
+        if (!confirm('Delete this session? All its messages will be removed from IndexedDB.')) return;
+        try {
+          const AgentStorage = (await import(_agUrl('agent-storage.js'))).default;
+          const ok = await AgentStorage.deleteSession(currentAgentId, sid);
+          if (!ok) throw new Error('deleteSession failed');
+          if (UI.cs === sid) {
+            UI.cs = 'cs_' + Date.now();
+            $('csLabel').textContent = 'session ' + UI.cs.slice(3, 11);
+            UI.reset();
+          }
+          toast('Session deleted');
+          modal.remove();
+          openHistory();   // refresh list
+        } catch (err) {
+          console.error('[AicqWebBot] session delete failed:', err);
+          toast('Delete failed: ' + err.message, 'error');
+        }
+      });
     });
   }
 

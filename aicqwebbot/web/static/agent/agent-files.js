@@ -3,6 +3,16 @@
    功能：浏览/打开/下载/删除/上传 虚拟FS文件 + Key查看
    ═════════════════════════════════════════════════════ */
 
+// [2026-09-07] i18n helper — 宿主页面提供 t()（aicq.me 全量字典 / 独立壳 shim）。
+// 键缺失时回退到英文文案，保证英文用户不会再看到纯中文面板。
+function _T(k, en) {
+  try {
+    const v = (typeof t === 'function') ? t(k)
+      : (typeof window !== 'undefined' && typeof window.t === 'function' ? window.t(k) : undefined);
+    return (v && v !== k) ? v : (en || k);
+  } catch (e) { return en || k; }
+}
+
 async function openFileManager(agentId) {
   const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
   const config = await AgentStorage.getConfig(agentId);
@@ -74,7 +84,7 @@ async function renderFileList(agentId, currentDir) {
 
   // 获取路径面包屑
   const parts = normDir.split('/').filter(Boolean);
-  let breadcrumb = `<a onclick="renderFileList('${agentId}','/')" style="cursor:pointer;color:var(--accent,#c00019)">根目录</a>`;
+  let breadcrumb = `<a onclick="renderFileList('${agentId}','/')" style="cursor:pointer;color:var(--accent,#c00019)">${_T('ag_fs_root','Root')}</a>`;
   let pathSoFar = '';
   for (const p of parts) {
     pathSoFar += '/' + p;
@@ -84,11 +94,11 @@ async function renderFileList(agentId, currentDir) {
   modal.innerHTML = `
     <div class="modal modal-wide" style="max-width:900px;max-height:90vh;overflow-y:auto">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
-        <h3>📁 文件管理 — ${fsSizeMB}MB / ${maxMB}MB</h3>
+        <h3>📁 ${_T('ag_fs_title','File Manager')} — ${fsSizeMB}MB / ${maxMB}MB</h3>
         <div style="display:flex;gap:8px">
-          <button class="btn-action" onclick="uploadToAgentFS('${agentId}','${currentDir}')">📤 上传</button>
-          <button class="btn-secondary" onclick="showAgentKeys('${agentId}')">🔑 Key 查看</button>
-          <button class="btn-secondary" onclick="document.getElementById('fileManagerModal').remove()">关闭</button>
+          <button class="btn-action" onclick="uploadToAgentFS('${agentId}','${currentDir}')">📤 ${_T('ag_fs_upload','Upload')}</button>
+          <button class="btn-secondary" onclick="showAgentKeys('${agentId}')">🔑 ${_T('ag_fs_keys','Keys')}</button>
+          <button class="btn-secondary" onclick="document.getElementById('fileManagerModal').remove()">${_T('ag_close','Close')}</button>
         </div>
       </div>
 
@@ -102,17 +112,17 @@ async function renderFileList(agentId, currentDir) {
 
       ${files.length === 0 && dirs.size === 0 ? `
         <div style="text-align:center;padding:40px;color:var(--text-muted)">
-          <p>📁 空目录</p>
-          <p style="font-size:13px;margin-top:8px">点击「上传」按钮添加文件，或让 agent 使用 exec-code/edit-file 工具创建文件</p>
+          <p>📁 ${_T('ag_fs_empty','Empty directory')}</p>
+          <p style="font-size:13px;margin-top:8px">${_T('ag_fs_empty_hint','Click "Upload" to add files, or ask the agent to create files with the exec-code / edit-file tools')}</p>
         </div>
       ` : `
         <table style="width:100%;font-size:13px;border-collapse:collapse">
           <thead>
             <tr style="border-bottom:2px solid var(--beige,#e0d0bc)">
-              <th style="text-align:left;padding:6px">名称</th>
-              <th style="text-align:right;padding:6px;width:100px">大小</th>
-              <th style="text-align:right;padding:6px;width:160px">修改时间</th>
-              <th style="text-align:center;padding:6px;width:200px">操作</th>
+              <th style="text-align:left;padding:6px">${_T('ag_fs_name','Name')}</th>
+              <th style="text-align:right;padding:6px;width:100px">${_T('ag_fs_size','Size')}</th>
+              <th style="text-align:right;padding:6px;width:160px">${_T('ag_fs_mtime','Modified')}</th>
+              <th style="text-align:center;padding:6px;width:200px">${_T('ag_fs_actions','Actions')}</th>
             </tr>
           </thead>
           <tbody>
@@ -129,7 +139,7 @@ async function renderFileList(agentId, currentDir) {
               const ext = f.name.split('.').pop()?.toLowerCase();
               const icon = _fileIcon(ext);
               const sizeStr = f.size < 1024 ? f.size + 'B' : f.size < 1024*1024 ? (f.size/1024).toFixed(1)+'KB' : (f.size/1024/1024).toFixed(1)+'MB';
-              const dateStr = f.last_accessed ? new Date(f.last_accessed).toLocaleString('zh-CN').slice(0,16) : '—';
+              const dateStr = f.last_accessed ? new Date(f.last_accessed).toLocaleString(undefined, { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }).slice(0, 16) : '—';
               const isPreviewable = ['txt','json','md','csv','js','py','html','css','xml','yaml','yml','log','sh','sql'].includes(ext);
               return `
                 <tr style="border-bottom:1px solid #eee" id="filerow_${agentId}_${f.path.replace(/[^a-zA-Z0-9]/g,'_')}">
@@ -137,10 +147,10 @@ async function renderFileList(agentId, currentDir) {
                   <td style="text-align:right;padding:6px;color:var(--text-muted)">${sizeStr}</td>
                   <td style="text-align:right;padding:6px;color:var(--text-muted)">${dateStr}</td>
                   <td style="text-align:center;padding:6px">
-                    ${isPreviewable ? `<button onclick="openFileViewer('${agentId}','${f.path}')" style="border:none;background:none;cursor:pointer;font-size:14px" title="打开/预览">👁</button>` : ''}
-                    ${['png','jpg','jpeg','gif','webp','svg','bmp'].includes(ext) ? `<button onclick="openFileViewer('${agentId}','${f.path}')" style="border:none;background:none;cursor:pointer;font-size:14px" title="预览图片">🖼</button>` : ''}
-                    <button onclick="downloadFromAgentFS('${agentId}','${f.path}')" style="border:none;background:none;cursor:pointer;font-size:14px" title="下载">⬇</button>
-                    <button onclick="deleteFromAgentFS('${agentId}','${f.path}','${f.name}')" style="border:none;background:none;cursor:pointer;font-size:14px;color:red" title="删除">🗑</button>
+                    ${isPreviewable ? `<button onclick="openFileViewer('${agentId}','${f.path}')" style="border:none;background:none;cursor:pointer;font-size:14px" title="${_T('ag_fs_open','Open / preview')}">👁</button>` : ''}
+                    ${['png','jpg','jpeg','gif','webp','svg','bmp'].includes(ext) ? `<button onclick="openFileViewer('${agentId}','${f.path}')" style="border:none;background:none;cursor:pointer;font-size:14px" title="${_T('ag_fs_preview_img','Preview image')}">🖼</button>` : ''}
+                    <button onclick="downloadFromAgentFS('${agentId}','${f.path}')" style="border:none;background:none;cursor:pointer;font-size:14px" title="${_T('ag_fs_download','Download')}">⬇</button>
+                    <button onclick="deleteFromAgentFS('${agentId}','${f.path}','${f.name}')" style="border:none;background:none;cursor:pointer;font-size:14px;color:red" title="${_T('ag_fs_delete','Delete')}">🗑</button>
                   </td>
                 </tr>
               `;
@@ -170,7 +180,7 @@ function _fileIcon(ext) {
 async function openFileViewer(agentId, path) {
   const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
   const file = await AgentStorage.readFile(agentId, path);
-  if (!file) { toast('文件不存在', 'error'); return; }
+  if (!file) { toast(_T('ag_fs_not_found','File not found'), 'error'); return; }
 
   const ext = path.split('.').pop()?.toLowerCase();
   const filename = path.split('/').pop();
@@ -201,15 +211,15 @@ async function openFileViewer(agentId, path) {
     rawHtml = new TextDecoder().decode(file.content);
     const srcCap = 200000;
     const escapedSrc = rawHtml.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').slice(0, srcCap)
-      + (rawHtml.length > srcCap ? '\n…（源码过长，仅显示前 20 万字符，可下载查看全文）' : '');
+      + (rawHtml.length > srcCap ? '\n…' + _T('ag_fs_src_trunc','Source too long — showing first 200k chars only; download to view the full text') : '');
     contentHtml = `
       <iframe id="htmlRenderFrame" sandbox="allow-scripts allow-forms allow-popups allow-modals"
         style="width:100%;height:72vh;border:1px solid var(--beige,#e0d0bc);border-radius:8px;background:#fff"></iframe>
       <pre id="htmlSourcePre" style="display:none;background:#1e1e1e;color:#d4d4d4;padding:16px;border-radius:8px;overflow:auto;max-height:72vh;font-size:13px;line-height:1.5;white-space:pre-wrap;word-break:break-all">${escapedSrc}</pre>`;
     htmlToolbar = `
-      <button class="btn-secondary" id="htmlViewRenderBtn" onclick="_toggleHtmlFileView('render')" style="font-weight:bold">🖥 渲染效果</button>
-      <button class="btn-secondary" id="htmlViewSourceBtn" onclick="_toggleHtmlFileView('source')">📝 源码</button>
-      <button class="btn-secondary" onclick="_openHtmlInNewTab()" title="在浏览器新标签页完整打开">↗ 新窗口</button>`;
+      <button class="btn-secondary" id="htmlViewRenderBtn" onclick="_toggleHtmlFileView('render')" style="font-weight:bold">🖥 ${_T('ag_fs_render','Rendered')}</button>
+      <button class="btn-secondary" id="htmlViewSourceBtn" onclick="_toggleHtmlFileView('source')">📝 ${_T('ag_fs_source','Source')}</button>
+      <button class="btn-secondary" onclick="_openHtmlInNewTab()" title="${_T('ag_fs_newtab_title','Open fully in a new browser tab')}">↗ ${_T('ag_fs_newtab','New tab')}</button>`;
   } else if (['txt','json','md','csv','js','py','css','xml','yaml','yml','log','sh','sql'].includes(ext)) {
     // 文本预览
     const text = new TextDecoder().decode(file.content);
@@ -222,7 +232,7 @@ async function openFileViewer(agentId, path) {
     contentHtml = `<embed src="${url}" type="application/pdf" style="width:100%;height:70vh;border-radius:8px" />`;
     setTimeout(() => URL.revokeObjectURL(url), 60000);
   } else {
-    contentHtml = `<p style="text-align:center;padding:40px;color:var(--text-muted)">不支持预览 .${ext} 文件，请下载后查看</p>`;
+    contentHtml = `<p style="text-align:center;padding:40px;color:var(--text-muted)">${_T('ag_fs_no_preview','Preview not supported for .{ext} — download to view').replace('{ext}', ext)}</p>`;
   }
 
   // HTML 渲染预览用更宽的弹窗（页面常见 1200px 宽设计）
@@ -234,8 +244,8 @@ async function openFileViewer(agentId, path) {
         <h3>${_fileIcon(ext)} ${filename}</h3>
         <div style="display:flex;gap:8px">
           ${htmlToolbar}
-          <button class="btn-action" onclick="downloadFromAgentFS('${agentId}','${path}')">⬇ 下载</button>
-          <button class="btn-secondary" onclick="document.getElementById('fileViewerModal').remove()">关闭</button>
+          <button class="btn-action" onclick="downloadFromAgentFS('${agentId}','${path}')">⬇ ${_T('ag_fs_download','Download')}</button>
+          <button class="btn-secondary" onclick="document.getElementById('fileViewerModal').remove()">${_T('ag_close','Close')}</button>
         </div>
       </div>
       <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">${path} · ${file.size} bytes</div>
@@ -268,7 +278,7 @@ window._toggleHtmlFileView = function(mode) {
 // ─── HTML 查看器：新标签页完整打开 ───
 window._openHtmlInNewTab = function() {
   const html = window._currentHtmlFileHtml;
-  if (!html) { toast('HTML 内容不可用', 'error'); return; }
+  if (!html) { toast(_T('ag_fs_html_unavail','HTML content unavailable'), 'error'); return; }
   const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }));
   window.open(url, '_blank');
   setTimeout(() => URL.revokeObjectURL(url), 120000);
@@ -278,22 +288,22 @@ window._openHtmlInNewTab = function() {
 async function downloadFromAgentFS(agentId, path) {
   const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
   const file = await AgentStorage.readFile(agentId, path);
-  if (!file) { toast('文件不存在', 'error'); return; }
+  if (!file) { toast(_T('ag_fs_not_found','File not found'), 'error'); return; }
   const blob = new Blob([file.content]);
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = path.split('/').pop();
   a.click();
   URL.revokeObjectURL(a.href);
-  toast('已下载: ' + a.download, 'success');
+  toast(_T('ag_fs_downloaded','Downloaded: ') + a.download, 'success');
 }
 
 // ─── 删除文件 ───
 async function deleteFromAgentFS(agentId, path, filename) {
-  if (!confirm(`确定删除 ${filename}？`)) return;
+  if (!confirm(_T('ag_fs_del_confirm','Delete {name}?').replace('{name}', filename))) return;
   const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
   await AgentStorage.deleteFile(agentId, path);
-  toast('已删除: ' + filename, 'success');
+  toast(_T('ag_fs_deleted','Deleted: ') + filename, 'success');
   // 刷新当前目录
   const currentDir = path.split('/').slice(0, -1).join('/') || '/';
   renderFileList(agentId, currentDir);
@@ -310,7 +320,7 @@ async function uploadToAgentFS(agentId, destDir) {
     const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
     const destPath = (destDir === '/' ? '' : destDir) + '/' + file.name;
     await AgentStorage.saveFile(agentId, destPath, buf);
-    toast(`已上传: ${file.name} (${(file.size/1024).toFixed(1)}KB)`, 'success');
+    toast(_T('ag_fs_uploaded','Uploaded: {name} ({kb}KB)').replace('{name}', file.name).replace('{kb}', (file.size/1024).toFixed(1)), 'success');
     renderFileList(agentId, destDir);
   };
   input.click();
@@ -337,28 +347,28 @@ async function showAgentKeys(agentId) {
 
   keyModal.innerHTML = `
     <div class="modal" style="max-width:600px">
-      <h3>🔑 Key 查看 — ${config.name}</h3>
+      <h3>🔑 ${_T('ag_fs_keys','Keys')} — ${config.name}</h3>
 
       <div style="margin-top:16px">
-        <h4>Agent 身份</h4>
+        <h4>${_T('ag_fs_identity','Agent Identity')}</h4>
         <table style="width:100%;font-size:13px">
           <tr><td style="padding:4px;color:var(--text-muted)">Agent ID</td><td style="padding:4px"><code>${config.agent_id}</code></td></tr>
           <tr><td style="padding:4px;color:var(--text-muted)">Owner ID</td><td style="padding:4px"><code>${config.owner_id || '—'}</code></td></tr>
           <tr><td style="padding:4px;color:var(--text-muted)">Public Key</td><td style="padding:4px"><code style="font-size:11px;word-break:break-all">${config.key_pair?.public_key || '—'}</code></td></tr>
           <tr><td style="padding:4px;color:var(--text-muted)">Private Key</td><td style="padding:4px">
             <code style="font-size:11px;word-break:break-all" id="privKeyMasked">${maskedPrivKey}</code>
-            <button onclick="toggleKeyVisibility('privKey','${config.key_pair?.private_key||''}','${maskedPrivKey}')" style="border:none;background:none;cursor:pointer;font-size:12px;margin-left:4px">显示</button>
-            <button onclick="copyToClipboard('${config.key_pair?.private_key||''}')" style="border:none;background:none;cursor:pointer;font-size:12px">复制</button>
+            <button onclick="toggleKeyVisibility('privKey','${config.key_pair?.private_key||''}','${maskedPrivKey}')" style="border:none;background:none;cursor:pointer;font-size:12px;margin-left:4px">${_T('ag_fs_show','Show')}</button>
+            <button onclick="copyToClipboard('${config.key_pair?.private_key||''}')" style="border:none;background:none;cursor:pointer;font-size:12px">${_T('ag_fs_copy','Copy')}</button>
           </td></tr>
           <tr><td style="padding:4px;color:var(--text-muted)">Access Token</td><td style="padding:4px">
             <code style="font-size:11px;word-break:break-all" id="tokenMasked">${(config.access_token||'').slice(0,20)}••••</code>
-            <button onclick="copyToClipboard('${config.access_token||''}')" style="border:none;background:none;cursor:pointer;font-size:12px;margin-left:4px">复制</button>
+            <button onclick="copyToClipboard('${config.access_token||''}')" style="border:none;background:none;cursor:pointer;font-size:12px;margin-left:4px">${_T('ag_fs_copy','Copy')}</button>
           </td></tr>
         </table>
       </div>
 
       <div style="margin-top:16px">
-        <h4>LLM 配置</h4>
+        <h4>${_T('ag_fs_llm_cfg','LLM Config')}</h4>
         <table style="width:100%;font-size:13px">
           <tr><td style="padding:4px;color:var(--text-muted)">Provider</td><td style="padding:4px">${llm.provider || '—'}</td></tr>
           <tr><td style="padding:4px;color:var(--text-muted)">Base URL</td><td style="padding:4px"><code>${llm.base_url || '—'}</code></td></tr>
@@ -366,20 +376,20 @@ async function showAgentKeys(agentId) {
           ${llm.api_key ? `
           <tr><td style="padding:4px;color:var(--text-muted)">API Key</td><td style="padding:4px">
             <code id="apiKeyMasked">${maskedKey}</code>
-            <button onclick="toggleKeyVisibility('apiKey','${llm.api_key}','${maskedKey}')" style="border:none;background:none;cursor:pointer;font-size:12px;margin-left:4px">显示</button>
-            <button onclick="copyToClipboard('${llm.api_key}')" style="border:none;background:none;cursor:pointer;font-size:12px">复制</button>
+            <button onclick="toggleKeyVisibility('apiKey','${llm.api_key}','${maskedKey}')" style="border:none;background:none;cursor:pointer;font-size:12px;margin-left:4px">${_T('ag_fs_show','Show')}</button>
+            <button onclick="copyToClipboard('${llm.api_key}')" style="border:none;background:none;cursor:pointer;font-size:12px">${_T('ag_fs_copy','Copy')}</button>
           </td></tr>` : ''}
           ${llm.cookie ? `
           <tr><td style="padding:4px;color:var(--text-muted)">Cookie</td><td style="padding:4px">
             <code id="cookieMasked" style="word-break:break-all">${maskedCookie}</code>
-            <button onclick="toggleKeyVisibility('cookie','${llm.cookie}','${maskedCookie}')" style="border:none;background:none;cursor:pointer;font-size:12px;margin-left:4px">显示</button>
-            <button onclick="copyToClipboard('${llm.cookie}')" style="border:none;background:none;cursor:pointer;font-size:12px">复制</button>
+            <button onclick="toggleKeyVisibility('cookie','${llm.cookie}','${maskedCookie}')" style="border:none;background:none;cursor:pointer;font-size:12px;margin-left:4px">${_T('ag_fs_show','Show')}</button>
+            <button onclick="copyToClipboard('${llm.cookie}')" style="border:none;background:none;cursor:pointer;font-size:12px">${_T('ag_fs_copy','Copy')}</button>
           </td></tr>` : ''}
         </table>
       </div>
 
       <div class="btn-row" style="margin-top:20px">
-        <button class="btn-secondary" onclick="document.getElementById('agentKeysModal').remove()">关闭</button>
+        <button class="btn-secondary" onclick="document.getElementById('agentKeysModal').remove()">${_T('ag_close','Close')}</button>
       </div>
     </div>
   `;
@@ -391,15 +401,15 @@ function toggleKeyVisibility(keyId, realValue, maskedValue) {
   const btn = el.nextElementSibling;
   if (el.textContent === maskedValue) {
     el.textContent = realValue;
-    btn.textContent = '隐藏';
+    btn.textContent = _T('ag_fs_hide','Hide');
   } else {
     el.textContent = maskedValue;
-    btn.textContent = '显示';
+    btn.textContent = _T('ag_fs_show','Show');
   }
 }
 
 function copyToClipboard(text) {
-  navigator.clipboard.writeText(text).then(() => toast('已复制', 'success'));
+  navigator.clipboard.writeText(text).then(() => toast(_T('ag_fs_copied','Copied'), 'success'));
 }
 
 // 暴露

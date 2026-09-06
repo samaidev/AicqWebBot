@@ -6,6 +6,16 @@
 // [2026-08-28] OpenCode Zen (opencode.ai) 免费匿名 LLM 共享模块
 const OCProviders = await import('/static/agent/agent-llm-providers.js?v=20260903d');
 
+// [2026-09-07] i18n helper — 宿主页面提供 t()（aicq.me 全量字典 / 独立壳 shim）。
+// 键缺失时回退到英文文案，保证英文用户不会再看到纯中文面板。
+function _T(k, en) {
+  try {
+    const v = (typeof t === 'function') ? t(k)
+      : (typeof window !== 'undefined' && typeof window.t === 'function' ? window.t(k) : undefined);
+    return (v && v !== k) ? v : (en || k);
+  } catch (e) { return en || k; }
+}
+
 async function openSettings(agentId) {
   const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
   const AgentTools = (await import('/static/agent/agent-tools.js?v=20260904b')).default;
@@ -32,14 +42,14 @@ async function openSettings(agentId) {
   modal.style.display = 'flex';
   modal.innerHTML = `
     <div class="modal modal-wide" style="max-width:700px;max-height:90vh;overflow-y:auto">
-      <h3>⚙️ ${config.name} 设置</h3>
+      <h3>⚙️ ${config.name} ${_T('ag_settings_title','Settings')}</h3>
       <div class="auth-tabs" style="margin-bottom:16px">
-        <button class="auth-tab active" onclick="switchSettingsTab('prompt')">提示词</button>
-        <button class="auth-tab" onclick="switchSettingsTab('llm')">LLM配置</button>
-        <button class="auth-tab" onclick="switchSettingsTab('tools')">工具</button>
+        <button class="auth-tab active" onclick="switchSettingsTab('prompt')">${_T('ag_tab_prompt','Prompt')}</button>
+        <button class="auth-tab" onclick="switchSettingsTab('llm')">${_T('ag_tab_llm','LLM Config')}</button>
+        <button class="auth-tab" onclick="switchSettingsTab('tools')">${_T('ag_tab_tools','Tools')}</button>
         <button class="auth-tab" onclick="switchSettingsTab('clawhub')">ClawHub</button>
-        <button class="auth-tab" onclick="switchSettingsTab('llmlog')">LLM日志</button>
-        <button class="auth-tab" onclick="switchSettingsTab('data')">数据</button>
+        <button class="auth-tab" onclick="switchSettingsTab('llmlog')">${_T('ag_tab_llmlog','LLM Log')}</button>
+        <button class="auth-tab" onclick="switchSettingsTab('data')">${_T('ag_tab_data','Data')}</button>
       </div>
 
       <!-- 提示词 -->
@@ -76,8 +86,8 @@ async function openSettings(agentId) {
       <!-- 工具 -->
       <div id="settingsTools" class="settings-tab" style="display:none">
         <div class="tool-actions" style="margin-bottom:8px">
-          <a onclick="document.querySelectorAll('#settingsToolsList input').forEach(c=>c.checked=true)">全选</a> |
-          <a onclick="document.querySelectorAll('#settingsToolsList input').forEach(c=>c.checked=false)">取消全选</a>
+          <a onclick="document.querySelectorAll('#settingsToolsList input').forEach(c=>c.checked=true)">${_T('ag_select_all','Select All')}</a> |
+          <a onclick="document.querySelectorAll('#settingsToolsList input').forEach(c=>c.checked=false)">${_T('ag_deselect_all','Deselect All')}</a>
         </div>
         <div class="agent-tools-list" id="settingsToolsList">
           ${allTools.map(t => `<label class="tool-checkbox"><input type="checkbox" value="${t.name}" ${enabledTools.has(t.name)?'checked':''}> ${t.name} <span class="tool-desc">${t.description.slice(0,60)}</span></label>`).join('')}
@@ -88,15 +98,15 @@ async function openSettings(agentId) {
       <!-- ClawHub -->
       <div id="settingsClawhub" class="settings-tab" style="display:none">
         <div class="form-group">
-          <label>搜索 ClawHub Skills</label>
+          <label>${_T('ag_clawhub_search_label','Search ClawHub Skills')}</label>
           <div style="display:flex;gap:8px">
-            <input type="text" id="clawhubSearchInput" placeholder="搜索技能..." style="flex:1" onkeypress="if(event.key==='Enter')clawhubSearch()">
-            <button class="btn-action" onclick="clawhubSearch()">搜索</button>
+            <input type="text" id="clawhubSearchInput" placeholder="${_T('ag_clawhub_search_ph','Search skills...')}" style="flex:1" onkeypress="if(event.key==='Enter')clawhubSearch()">
+            <button class="btn-action" onclick="clawhubSearch()">${_T('ag_search_btn','Search')}</button>
           </div>
         </div>
         <div id="clawhubResults" style="margin-top:12px"></div>
         <hr style="margin:16px 0">
-        <h4>已安装的 Skills</h4>
+        <h4>${_T('ag_installed_skills','Installed Skills')}</h4>
         <div id="installedSkills" style="margin-top:8px"></div>
       </div>
 
@@ -106,9 +116,9 @@ async function openSettings(agentId) {
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
           <span style="font-size:12px;color:var(--text-muted,#888)" id="llmLogSummary"></span>
           <span style="flex:1"></span>
-          <a onclick="refreshLlmLog()" style="cursor:pointer;font-size:12px">刷新</a>
+          <a onclick="refreshLlmLog()" style="cursor:pointer;font-size:12px">${_T('ag_refresh','Refresh')}</a>
           <span style="color:#ddd">|</span>
-          <a onclick="clearLlmLog()" style="cursor:pointer;font-size:12px;color:#c00">清空</a>
+          <a onclick="clearLlmLog()" style="cursor:pointer;font-size:12px;color:#c00">${_T('ag_clear','Clear')}</a>
         </div>
         <div id="llmLogTableWrap" style="overflow-x:auto"></div>
       </div>
@@ -432,10 +442,10 @@ async function testLLMConnection(agentId) {
         } catch { errDetail = errText; }
       } catch {}
       let hint = '';
-      if (resp.status === 502) hint = ' — 代理无法连接到 LLM API（DNS/网络/TLS 问题）';
-      else if (resp.status === 401 || resp.status === 403) hint = ' — 认证失败，API Key 或 Cookie 不正确';
-      else if (resp.status === 404) hint = ' — URL 不存在，检查 base_url';
-      resultEl.innerHTML = `<span style="color:#c00">❌ HTTP ${resp.status}${hint}</span><br><span style="font-size:12px;color:var(--text-muted,#999)">详情: ${String(errDetail).slice(0,300)}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+      if (resp.status === 502) hint = _T('ag_err_502_hint',' — proxy cannot reach the LLM API (DNS/network/TLS)');
+      else if (resp.status === 401 || resp.status === 403) hint = _T('ag_err_auth_hint',' — auth failed: check API Key or Cookie');
+      else if (resp.status === 404) hint = _T('ag_err_404_hint',' — URL not found: check base_url');
+      resultEl.innerHTML = `<span style="color:#c00">❌ HTTP ${resp.status}${hint}</span><br><span style="font-size:12px;color:var(--text-muted,#999)">${_T('ag_detail_label','Detail: ')}${String(errDetail).slice(0,300)}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
       return;
     }
 
@@ -497,9 +507,9 @@ async function testLLMConnection(agentId) {
               }
             }
           }
-          contentPreview = (_pv || '(空响应)').slice(0, 50);
+          contentPreview = (_pv || _T('ag_empty_response','(empty response)')).slice(0, 50);
         } else {
-          contentPreview = data.choices?.[0]?.message?.content?.slice(0, 50) || '(空响应)';
+          contentPreview = data.choices?.[0]?.message?.content?.slice(0, 50) || _T('ag_empty_response','(empty response)');
         }
         if (data.error) {
           resultEl.innerHTML = `<span style="color:#c00">❌ ${t('ag_test_llm_err')}${data.error.message || data.error}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
@@ -526,23 +536,23 @@ async function clawhubSearch() {
   const query = document.getElementById('clawhubSearchInput').value.trim();
   if (!query) return;
   const results = document.getElementById('clawhubResults');
-  results.innerHTML = '<p>搜索中...</p>';
+  results.innerHTML = '<p>' + _T('ag_searching','Searching...') + '</p>';
 
   try {
     const resp = await fetch('https://clawhub.ai/api/v1/search?q=' + encodeURIComponent(query) + '&limit=20');
     const data = await resp.json();
     const skills = Array.isArray(data) ? data : (data.results || []);
-    if (!skills.length) { results.innerHTML = '<p>未找到相关技能</p>'; return; }
+    if (!skills.length) { results.innerHTML = '<p>' + _T('ag_no_skills','No skills found') + '</p>'; return; }
 
     results.innerHTML = skills.map(s => `
       <div class="clawhub-skill-item">
         <div><strong>${s.name || s.slug}</strong></div>
         <div style="font-size:12px;color:var(--text-muted)">${s.description || ''}</div>
-        <button class="btn-action" style="margin-top:4px;padding:2px 8px;font-size:12px" onclick="installClawhubSkill('${s.slug || s.name}')">安装</button>
+        <button class="btn-action" style="margin-top:4px;padding:2px 8px;font-size:12px" onclick="installClawhubSkill('${s.slug || s.name}')">${_T('ag_install','Install')}</button>
       </div>
     `).join('');
   } catch(e) {
-    results.innerHTML = '<p style="color:red">搜索失败: ' + e.message + '</p>';
+    results.innerHTML = '<p style="color:red">' + _T('ag_search_failed','Search failed: ') + e.message + '</p>';
   }
 }
 
@@ -564,10 +574,10 @@ async function installClawhubSkill(slug) {
       source: 'clawhub'
     });
 
-    toast('Skill ' + slug + ' 安装成功', 'success');
+    toast('Skill ' + slug + ' ' + _T('ag_install_ok','installed successfully'), 'success');
     loadInstalledSkills(agentId);
   } catch(e) {
-    toast('安装失败: ' + e.message, 'error');
+    toast(_T('ag_install_failed','Install failed: ') + e.message, 'error');
   }
 }
 
@@ -576,12 +586,12 @@ async function loadInstalledSkills(agentId) {
   const skills = await AgentStorage.getSkills(agentId);
   const el = document.getElementById('installedSkills');
   if (!el) return;
-  if (!skills.length) { el.innerHTML = '<p style="color:var(--text-muted)">暂无已安装的 Skills</p>'; return; }
+  if (!skills.length) { el.innerHTML = '<p style="color:var(--text-muted)">' + _T('ag_no_installed_skills','No skills installed yet') + '</p>'; return; }
   el.innerHTML = skills.map(s => `
     <div class="clawhub-skill-item">
       <div><strong>${s.name}</strong> <span style="font-size:11px;color:var(--text-muted)">v${s.version||'1.0'}</span></div>
       <div style="font-size:12px;color:var(--text-muted)">${s.description?.slice(0,80)||''}</div>
-      <button class="btn-secondary" style="margin-top:4px;padding:2px 8px;font-size:12px;color:red" onclick="uninstallClawhubSkill('${agentId}','${s.slug}')">卸载</button>
+      <button class="btn-secondary" style="margin-top:4px;padding:2px 8px;font-size:12px;color:red" onclick="uninstallClawhubSkill('${agentId}','${s.slug}')">${_T('ag_uninstall','Uninstall')}</button>
     </div>
   `).join('');
 }
@@ -589,7 +599,7 @@ async function loadInstalledSkills(agentId) {
 async function uninstallClawhubSkill(agentId, slug) {
   const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
   await AgentStorage.removeSkill(agentId, slug);
-  toast('Skill 已卸载', 'success');
+  toast(_T('ag_skill_uninstalled','Skill uninstalled'), 'success');
   loadInstalledSkills(agentId);
 }
 
@@ -597,7 +607,7 @@ async function uninstallClawhubSkill(agentId, slug) {
 async function exportAgentData(agentId) {
   const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
   const data = await AgentStorage.exportAgent(agentId);
-  if (!data) { toast('无数据', 'error'); return; }
+  if (!data) { toast(_T('ag_no_data','No data to export'), 'error'); return; }
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
@@ -716,7 +726,7 @@ function _llmContentSummary(e) {
   let out = (e.output || '').trim();
   const tcLine = out.split('\n').find(l => l.startsWith('[tool_calls]'));
   if (tcLine) return '🔧 ' + tcLine.replace('[tool_calls] ', '').slice(0, 50);
-  if (!out) return '(空响应)';
+  if (!out) return _T('ag_empty_response','(empty response)');
   return out.slice(0, 40).replace(/\n/g, ' ') + (out.length > 40 ? '…' : '');
 }
 
@@ -728,24 +738,24 @@ async function refreshLlmLog() {
     const LLMLog = (await import('/static/agent/agent-llm-log.js?v=20260904b')).default;
     _llmLogRows = LLMLog.list();
   } catch (e) {
-    wrap.innerHTML = '<p style="color:red;font-size:12px">日志模块加载失败: ' + _llmEsc(e.message) + '</p>';
+    wrap.innerHTML = '<p style="color:red;font-size:12px">' + _T('ag_log_module_failed','Log module load failed: ') + _llmEsc(e.message) + '</p>';
     return;
   }
   const rows = _llmLogRows;
   if (summary) {
     summary.textContent = rows.length
-      ? `最近 ${rows.length} 条（上限 100，自动淘汰最旧）`
-      : '暂无日志 — 与智能体对话后这里会自动记录每次 LLM 调用';
+      ? _T('ag_log_summary','Last {n} entries (cap 100, oldest auto-evicted)').replace('{n}', rows.length)
+      : _T('ag_log_empty_hint','No logs yet — every LLM call is recorded here automatically after you chat with the agent');
   }
   if (!rows.length) {
     wrap.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted,#999);font-size:13px">' +
-      '📭 暂无 LLM 调用日志<br><span style="font-size:11px">给智能体发一条消息后，这里会实时记录模型 / 耗时 / Token / 输入输出</span></div>';
+      _T('ag_log_empty1','📭 No LLM call logs yet') + '<br><span style="font-size:11px">' + _T('ag_log_empty2','Send the agent a message — model / latency / tokens / input & output get recorded here in real time') + '</span></div>';
     return;
   }
   const trs = rows.map(e => {
     const st = _llmStatusBadge(e);
     const content = _llmContentSummary(e);
-    return `<tr style="border-bottom:1px solid #f0ebe3;cursor:pointer" onclick="showLlmLogDetail('${e.id}')" title="点击查看完整输入输出">
+    return `<tr style="border-bottom:1px solid #f0ebe3;cursor:pointer" onclick="showLlmLogDetail('${e.id}')" title="${_T('ag_log_row_title','Click to view full input/output')}">
       <td style="padding:6px 8px;white-space:nowrap;font-size:12px;color:var(--text-muted,#666)">${_llmFmtTime(e.ts)}</td>
       <td style="padding:6px 8px;font-size:12px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_llmEsc(e.model)}">${_llmEsc(e.model || '-')}</td>
       <td style="padding:6px 8px">${st}</td>
@@ -758,8 +768,8 @@ async function refreshLlmLog() {
     <table style="width:100%;border-collapse:collapse;min-width:560px">
       <thead>
         <tr style="border-bottom:2px solid #e5ddcf;background:#faf8f5">
-          <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">时间</th>
-          <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">模型</th>
+          <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">${_T('ag_log_time','Time')}</th>
+          <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">${_T('ag_log_model','Model')}</th>
           <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">Status</th>
           <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">Latency</th>
           <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">Tokens (in/out)</th>
@@ -771,7 +781,7 @@ async function refreshLlmLog() {
 }
 
 async function clearLlmLog() {
-  if (!confirm('清空全部 LLM 调用日志？')) return;
+  if (!confirm(_T('ag_log_clear_confirm','Clear all LLM call logs?'))) return;
   const LLMLog = (await import('/static/agent/agent-llm-log.js?v=20260904b')).default;
   LLMLog.clear();
   refreshLlmLog();
@@ -786,23 +796,23 @@ function showLlmLogDetail(id) {
   const ov = document.createElement('div');
   ov.id = 'llmLogDetailOverlay';
   ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px';
-  const inputTxt = e.input || '(无输入记录)';
-  const outputTxt = e.output || '(空)';
+  const inputTxt = e.input || _T('ag_log_no_input','(no input recorded)');
+  const outputTxt = e.output || _T('ag_log_no_output','(empty)');
   ov.innerHTML = `
     <div style="background:#fff;border-radius:12px;max-width:820px;width:100%;max-height:86vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.25)">
       <div style="padding:14px 18px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
-        <strong style="font-size:14px">LLM 调用详情</strong>
+        <strong style="font-size:14px">${_T('ag_log_detail_title','LLM Call Detail')}</strong>
         ${_llmStatusBadge(e)}
         <span style="font-size:12px;color:#666">${_llmEsc(e.model)}</span>
         <span style="font-size:12px;color:#999">${_llmFmtTime(e.ts)} · ${_llmFmtLatency(e.latency_ms)} · ${_llmFmtTokens(e)}${e.phase ? ' · ' + _llmEsc(e.phase) : ''}</span>
         <span style="flex:1"></span>
-        <button class="btn-secondary" onclick="document.getElementById('llmLogDetailOverlay').remove()">关闭</button>
+        <button class="btn-secondary" onclick="document.getElementById('llmLogDetailOverlay').remove()">${_T('ag_close','Close')}</button>
       </div>
       ${e.error ? `<div style="margin:10px 18px 0;padding:10px 12px;background:#fdeaea;border:1px solid #f3c1c1;border-radius:8px;color:#c00;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow-y:auto">❌ ${_llmEsc(e.error)}</div>` : ''}
       <div style="padding:12px 18px;overflow-y:auto;flex:1">
-        <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px">输入 (${e.msg_count !== null && e.msg_count !== undefined ? e.msg_count + ' 条消息' : '—'})</div>
+        <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px">${_T('ag_log_input','Input')} (${e.msg_count !== null && e.msg_count !== undefined ? e.msg_count + ' ' + _T('ag_log_msgs','messages') : '—'})</div>
         <pre style="margin:0 0 16px;padding:12px;background:#f8f6f2;border:1px solid #eee5d8;border-radius:8px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow-y:auto;font-family:ui-monospace,Menlo,Consolas,monospace">${_llmEsc(inputTxt)}</pre>
-        <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px">输出</div>
+        <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px">${_T('ag_log_output','Output')}</div>
         <pre style="margin:0;padding:12px;background:#f4f9f4;border:1px solid #dcecdc;border-radius:8px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow-y:auto;font-family:ui-monospace,Menlo,Consolas,monospace">${_llmEsc(outputTxt)}</pre>
       </div>
     </div>`;

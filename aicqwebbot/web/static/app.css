@@ -91,6 +91,11 @@ body {
 .cs-label { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 #msgFlow { flex: 1; overflow-y: auto; padding: 18px 14px; display: flex; flex-direction: column; gap: 14px; }
+/* [2026-09-06][关键修复] 滚动容器内的 flex 子项禁止收缩：
+   内容超过一屏时 flex-shrink 会把子项压扁——工具卡因 overflow:hidden
+   最小尺寸为 0，被压到只剩 36px 头部条（参数/结果全部不可见）。
+   有了这条，超出部分走 overflow-y 滚动而不是压缩子项。 */
+#msgFlow > * { flex-shrink: 0; }
 .msg { max-width: 82%; padding: 10px 14px; border-radius: 14px; font-size: 14.5px; line-height: 1.65; white-space: pre-wrap; word-break: break-word; }
 .msg.user { align-self: flex-end; background: var(--accent); color: #fff; border-bottom-right-radius: 4px; }
 .msg.agent { align-self: flex-start; background: var(--card); border: 1px solid var(--border); border-bottom-left-radius: 4px; }

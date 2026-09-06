@@ -205,6 +205,14 @@ function updateSettingsLlmUI(existingConfig) {
       ${provider==='custom' ? `<div class="form-group"><label>${t('ag_base_url')}</label><input type="text" id="settingsBaseUrl" value="${baseUrl}" placeholder="${t('ag_base_url_ph')}"></div>` : ''}
       <div class="form-group"><label>${t('ag_api_key')}</label><input type="password" id="settingsApiKey" value="${cfg.api_key||''}"></div>
       <div class="form-group"><label>${t('ag_model')}</label><input type="text" id="settingsModel" value="${cfg.model||''}" placeholder="${t('ag_model_ph')}"></div>
+      ${(provider==='openai'||provider==='custom') ? `
+      <!-- [2026-09-06] API 协议选择：Chat Completions / Responses（gpt-5.x 等新模型推荐 Responses） -->
+      <div class="form-group"><label>API 协议 / API protocol</label>
+        <select id="settingsApiType">
+          <option value="openai-completion" ${(cfg.api_type||'openai-completion')!=='openai-response'?'selected':''}>Chat Completions — POST /chat/completions</option>
+          <option value="openai-response" ${cfg.api_type==='openai-response'?'selected':''}>Responses — POST /responses (OpenAI Responses API)</option>
+        </select>
+      </div>` : ''}
       <div class="form-group" style="margin-top:12px;padding:10px;background:#faf8f5;border-radius:6px;border:1px solid var(--beige,#e0d0bc)">
         <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
           <input type="checkbox" id="settingsCompatMode" ${cfg.compat_mode?'checked':''} style="width:auto">
@@ -246,6 +254,8 @@ async function saveSettings(agentId, tab) {
       config.llm_config.base_url = provider==='deepseek' ? 'https://api.deepseek.com/v1' :
         provider==='openai' ? 'https://api.openai.com/v1' :
         document.getElementById('settingsBaseUrl')?.value || '';
+      // [2026-09-06] API 协议（openai/custom 显示下拉；deepseek 无下拉时归位 chat）
+      config.llm_config.api_type = document.getElementById('settingsApiType')?.value || 'openai-completion';
       // 兼容模式开关
       const compatCheckbox = document.getElementById('settingsCompatMode');
       config.llm_config.compat_mode = compatCheckbox ? compatCheckbox.checked : false;
@@ -294,6 +304,8 @@ async function testLLMConnection(agentId) {
     if (provider === 'deepseek') llmConfig.base_url = 'https://api.deepseek.com/v1';
     else if (provider === 'openai') llmConfig.base_url = 'https://api.openai.com/v1';
     else llmConfig.base_url = document.getElementById('settingsBaseUrl')?.value.trim() || '';
+    // [2026-09-06] API 协议（与聊天路径一致）
+    llmConfig.api_type = document.getElementById('settingsApiType')?.value || 'openai-completion';
     // 读取兼容模式开关
     const compatCheckbox = document.getElementById('settingsCompatMode');
     llmConfig.compat_mode = compatCheckbox ? compatCheckbox.checked : false;
@@ -364,6 +376,22 @@ async function testLLMConnection(agentId) {
         messages: [{ role: 'user', content: 'ping' }],
         stream: false,
         max_tokens: 10
+      }),
+      stream: false
+    } : llmConfig.api_type === 'openai-response' ? {
+      // [2026-09-06] Responses 协议连通性测试：POST {base}/responses，Responses 格式 ping
+      target_url: llmConfig.base_url.replace(/\/+$/, '') + '/responses',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${llmConfig.api_key}`
+      },
+      body: JSON.stringify({
+        model: llmConfig.model,
+        input: [{ role: 'user', content: [{ type: 'input_text', text: 'ping' }] }],
+        stream: false,
+        store: false,
+        max_output_tokens: 16
       }),
       stream: false
     } : {
@@ -459,7 +487,20 @@ async function testLLMConnection(agentId) {
       try {
         const data = JSON.parse(text);
         modelInfo = data.model || llmConfig.model;
-        contentPreview = data.choices?.[0]?.message?.content?.slice(0, 50) || '(空响应)';
+        // [2026-09-06] Responses 协议解析：output_text / output[].content[].text
+        if (llmConfig.api_type === 'openai-response') {
+          let _pv = data.output_text || '';
+          if (!_pv && Array.isArray(data.output)) {
+            for (const item of data.output) {
+              if (item.type === 'message' && Array.isArray(item.content)) {
+                for (const c of item.content) { if (c.type === 'output_text' && c.text) _pv += c.text; }
+              }
+            }
+          }
+          contentPreview = (_pv || '(空响应)').slice(0, 50);
+        } else {
+          contentPreview = data.choices?.[0]?.message?.content?.slice(0, 50) || '(空响应)';
+        }
         if (data.error) {
           resultEl.innerHTML = `<span style="color:#c00">❌ ${t('ag_test_llm_err')}${data.error.message || data.error}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
           return;
@@ -467,7 +508,9 @@ async function testLLMConnection(agentId) {
       } catch {
         contentPreview = text.slice(0, 50);
       }
-      resultEl.innerHTML = `<span style="color:green">✅ ${t('ag_test_ok')}</span><br><span style="font-size:12px">${t('ag_model_label')}: <code>${modelInfo}</code></span><br><span style="font-size:12px">${t('ag_response_preview')}: ${contentPreview}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>${compatNote}`;
+      // Responses 协议无 compat 概念，不提示 tools 风险
+      const _note = (llmConfig.api_type === 'openai-response') ? '' : compatNote;
+      resultEl.innerHTML = `<span style="color:green">✅ ${t('ag_test_ok')}</span><br><span style="font-size:12px">${t('ag_model_label')}: <code>${modelInfo}</code> (${llmConfig.api_type || 'openai-completion'})</span><br><span style="font-size:12px">${t('ag_response_preview')}: ${contentPreview}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>${_note}`;
     }
   } catch(e) {
     const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);

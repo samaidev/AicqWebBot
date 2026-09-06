@@ -179,6 +179,45 @@ const AgentStorage = {
     });
   },
 
+  // [2026-09-06] 历史会话面板存储层：列出某 agent 的全部会话（按 session_id 聚合）。
+  // 直接遍历 agent_conversations 的 agent_session 索引（会话行是懒创建的，
+  // agent_sessions 表可能还没建行，不能只依赖它）。返回：
+  //   [{ session_id, title, message_count, first_at, last_at }] 按 last_at 降序
+  async listSessions(agentId) {
+    await this.init();
+    if (!this._db) return [];
+    return new Promise((resolve) => {
+      const tx = this._db.transaction('agent_conversations', 'readonly');
+      const idx = tx.objectStore('agent_conversations').index('agent_session');
+      const req = idx.getAll(IDBKeyRange.bound([agentId, ''], [agentId, '\uffff']));
+      req.onsuccess = () => {
+        const bySession = {};
+        for (const m of (req.result || [])) {
+          if (!m || !m.session_id) continue;
+          let s = bySession[m.session_id];
+          if (!s) {
+            s = bySession[m.session_id] = {
+              session_id: m.session_id, title: '',
+              message_count: 0, first_at: m.created_at || '', last_at: m.created_at || ''
+            };
+          }
+          s.message_count++;
+          if (m.created_at) {
+            if (!s.first_at || m.created_at < s.first_at) s.first_at = m.created_at;
+            if (m.created_at > s.last_at) s.last_at = m.created_at;
+          }
+          // 标题 = 最早一条用户消息（多模态 content 取 JSON 前缀）
+          if (!s.title && m.role === 'user') {
+            const c = (typeof m.content === 'string') ? m.content : JSON.stringify(m.content || '');
+            if (c && c.trim()) s.title = c.replace(/\s+/g, ' ').trim().slice(0, 80);
+          }
+        }
+        resolve(Object.values(bySession).sort((a, b) => (b.last_at || '').localeCompare(a.last_at || '')));
+      };
+      req.onerror = () => resolve([]);
+    });
+  },
+
   async getConversations(agentId, sessionId, limit = 50) {
     await this.init();
     if (!this._db) return [];

@@ -109,17 +109,22 @@ body {
   display: flex; align-items: center; gap: 8px; padding: 8px 12px;
   cursor: pointer; color: var(--muted); font-family: ui-monospace, monospace;
 }
+.tool-card .tc-head .tc-arrow { font-size: 10px; width: 10px; }
 .tool-card .tc-head .tc-name { color: var(--text); font-weight: 600; }
 .tool-card .tc-state { margin-left: auto; }
 .tool-card .tc-state.ok { color: var(--ok); }
 .tool-card .tc-state.err { color: var(--err); }
 .tool-card .tc-body {
   display: none; border-top: 1px solid var(--border); padding: 10px 12px;
-  max-height: 260px; overflow-y: auto; font-family: ui-monospace, monospace;
+  max-height: 320px; overflow-y: auto; font-family: ui-monospace, monospace;
   white-space: pre-wrap; word-break: break-word; color: var(--muted);
 }
 .tool-card.open .tc-body { display: block; }
-.tool-card .tc-body b { color: var(--text); }
+.tool-card .tc-body b { color: var(--text); display: block; margin-bottom: 4px; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; font-size: 12px; }
+/* [2026-09-06] 工具卡片两段式：命令参数 / 返回结果 */
+.tool-card .tc-sec { padding: 2px 0 8px; }
+.tool-card .tc-sec.tc-out { border-top: 1px dashed var(--border); padding-top: 8px; }
+.tool-card .tc-pending { color: var(--muted); font-style: italic; }
 
 #composer {
   display: flex; gap: 10px; padding: 12px 14px; background: var(--panel);
@@ -206,3 +211,19 @@ img.chat-img { max-width: 260px; border-radius: 10px; display: block; margin: 8p
 .webbot-toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 .webbot-toast.success { background: var(--ok); color: #fff; }
 .webbot-toast.error { background: var(--err); color: #fff; }
+
+/* ═══════════ [2026-09-06] History sessions panel (☰) ═══════════ */
+.hist-list { display: flex; flex-direction: column; gap: 6px; max-height: 55vh; overflow-y: auto; }
+.hist-row {
+  border: 1px solid var(--border); background: var(--card); border-radius: 10px;
+  padding: 9px 12px; cursor: pointer; transition: border-color .12s ease, transform .12s ease;
+}
+.hist-row:hover { border-color: var(--accent); transform: translateY(-1px); }
+.hist-row .hist-title {
+  font-size: 13.5px; font-weight: 600; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.hist-row .hist-meta { font-size: 11.5px; color: var(--muted); margin-top: 3px; }
+.hist-row .hist-meta code { background: var(--codebg); padding: 1px 5px; border-radius: 4px; font-size: 10.5px; }
+#btnHistory { font-family: inherit; }
+#btnHistory:hover { border-color: var(--accent); }

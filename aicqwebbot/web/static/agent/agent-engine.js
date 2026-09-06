@@ -664,7 +664,8 @@ const AgentEngine = {
       // 调 LLM
       // [2026-08-28] 传入 replyTarget — opencode 流式路径需要知道往哪个会话发 stream_chunk
       // [FIX 2026-08-30] const → let: 空回复降级重试路径需要重新赋值 llmResp
-      let llmResp = await this._callLLM(messages, tools, toolsNL, config, sessionId, replyTarget);
+      // [2026-09-06] 经 _callLLMRetry 包装：429 限流 30s 起算指数退避，最多重试 5 次
+      let llmResp = await this._callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget);
 
       if (!llmResp.success) {
         this._sendStreamChunk(config.agent_id, replyTarget, config, `[Error: ${llmResp.error}]`, 'text');
@@ -769,7 +770,8 @@ const AgentEngine = {
           console.warn(`[AgentEngine._agentLoop] LLM empty content, auto-retry ${emptyRetries}/5 in ${delay}ms (nonStream=${forceNonStream})`);
           this._sendStreamChunk(config.agent_id, replyTarget, config, `(LLM 空回复，自动重试 ${emptyRetries}/5${forceNonStream ? '·非流式' : ''}...)`, 'thinking');
           await new Promise(r => setTimeout(r, delay));
-          llmResp = await this._callLLM(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream);
+          // [2026-09-06] 同样经 _callLLMRetry 包装（429 指数退避）
+          llmResp = await this._callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream);
           if (llmResp && llmResp.success && (llmResp.content || '').trim()) {
             emptyRetries = 0;
             // 拿到非流式结果, 落到下方正常处理 (可能含 tool_calls → 继续循环)
@@ -804,6 +806,28 @@ const AgentEngine = {
 
     // 6. 发送 stream_end
     this._sendStreamEnd(config.agent_id, replyTarget, config);
+  },
+
+  // [2026-09-06] 429 限流专用包装：指数退避重试，30s 起算（30/60/120/240/480s），最多 5 次。
+  // 判定依据：底层调用返回 http_status === 429（各 provider 失败路径统一携带该字段）。
+  // 每次等待前向聊天流发 thinking 提示，让长等待对用户可见。
+  async _callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream) {
+    const MAX_429_RETRIES = 5;       // 最多重试 5 次
+    const BASE_429_MS = 30 * 1000;   // 30 秒起算
+    let attempt = 0;
+    while (true) {
+      const r = await this._callLLM(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream);
+      if (r && r.success === false && r.http_status === 429 && attempt < MAX_429_RETRIES) {
+        const delay = BASE_429_MS * Math.pow(2, attempt);   // 30/60/120/240/480s
+        attempt++;
+        console.warn(`[AgentEngine._callLLMRetry] HTTP 429 rate-limited — exponential backoff retry ${attempt}/${MAX_429_RETRIES} in ${Math.round(delay / 1000)}s`);
+        this._sendStreamChunk(config.agent_id, replyTarget, config,
+          `(模型限流 429 — ${Math.round(delay / 1000)}s 后自动重试 ${attempt}/${MAX_429_RETRIES}...)`, 'thinking');
+        await new Promise(res => setTimeout(res, delay));
+        continue;
+      }
+      return r;
+    }
   },
 
   // 调 LLM API（通过 aicq 服务器代理）
@@ -1067,6 +1091,60 @@ const AgentEngine = {
       return await this._callOpenCode(messages, tools, config, replyTarget, false, forceNonStream);
     }
 
+    // ── [2026-09-06] openai-response（OpenAI Responses API，POST /responses）──
+    // BYOK 供应商（openai / custom）可选 Responses 协议：gpt-5.x 等新模型推荐。
+    // 复用 opencode 的 _messagesToResponsesInput / _toolsToResponsesFormat /
+    // _parseResponsesOutput；通用路径本就非流式（stream:false），无需处理 SSE。
+    if (llmConfig.api_type === 'openai-response') {
+      const _base = (llmConfig.base_url || '').replace(/\/+$/, '');
+      const _conv = this._messagesToResponsesInput(messages);
+      const _rbody = { model: llmConfig.model, input: _conv.input, stream: false, store: false };
+      if (_conv.instructions) _rbody.instructions = _conv.instructions;
+      if (tools.length > 0) _rbody.tools = this._toolsToResponsesFormat(tools);
+      const _proxyBody = {
+        target_url: _base + '/responses',
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${llmConfig.api_key}`
+        },
+        body: JSON.stringify(_rbody),
+        stream: false
+      };
+      console.log('[AgentEngine._callLLM] openai-response →', _proxyBody.target_url, 'model=', llmConfig.model, 'tools=', tools.length);
+      const _t0 = Date.now();
+      const _resp = await fetch('/api/v1/agent/llm-proxy', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (llmConfig.__authToken || '') },
+        body: JSON.stringify(_proxyBody)
+      });
+      if (!_resp.ok) {
+        let _errDetail = '';
+        try { _errDetail = await _resp.text(); } catch (e) {}
+        this._logLLM({ provider, model: llmConfig.model, status: _resp.status,
+          latency_ms: Date.now() - _t0, msg_count: messages.length, _messages: messages,
+          error: ('HTTP ' + _resp.status + ' — ' + _errDetail).slice(0, 500), agent_id: config.agent_id });
+        return { success: false, http_status: _resp.status,
+          error: `Responses API error: ${_resp.status} — ${String(_errDetail).slice(0, 400)}` };
+      }
+      const _text = await _resp.text();
+      let _data;
+      try { _data = JSON.parse(_text); }
+      catch (e) {
+        this._logLLM({ provider, model: llmConfig.model, status: 'ERR',
+          latency_ms: Date.now() - _t0, msg_count: messages.length, _messages: messages,
+          error: 'response not valid JSON: ' + _text.slice(0, 300), agent_id: config.agent_id });
+        return { success: false, error: 'Responses API response is not valid JSON: ' + _text.slice(0, 200) };
+      }
+      const _parsed = this._parseResponsesOutput(_data);
+      if (_parsed.success === false && typeof _parsed.error === 'string') {
+        // BYOK 语境下的错误文案去掉 OpenCode 前缀
+        _parsed.error = _parsed.error.replace('OpenCode responses', 'Responses API');
+      }
+      this._logLLMGeneric(_parsed, _data, llmConfig, messages, _t0, config);
+      return _parsed;
+    }
+
 // 构建 prompt（兼容模式需要把 toolsNL 拼到 messages 里）
     let prompt = null;
     if (useCompatMode) {
@@ -1167,7 +1245,8 @@ const AgentEngine = {
       this._logLLM({ provider, model: llmConfig.model, status: resp.status,
         latency_ms: Date.now() - _llmT0, msg_count: messages.length, _messages: messages,
         error: ('HTTP ' + resp.status + ' — ' + errDetail).slice(0, 500), agent_id: config.agent_id });
-      return { success: false, error: `LLM proxy error: ${resp.status} — ${errDetail}${hint}` };
+      // [2026-09-06] http_status 供 _callLLMRetry 识别 429 限流（30s 指数退避重试）
+      return { success: false, http_status: resp.status, error: `LLM proxy error: ${resp.status} — ${errDetail}${hint}` };
     }
 
     // 解析响应（scnet 已在上面的三段式分支处理，这里只处理 OpenAI 兼容）
@@ -1252,7 +1331,7 @@ const AgentEngine = {
       this._logLLM({ provider: 'scnet', model: 'scnet:' + (llmConfig.model_id || 520), status: resp.status,
         latency_ms: Date.now() - _llmT0, _rawInput: content,
         error: ('HTTP ' + resp.status + ' — ' + errDetail).slice(0, 500), agent_id: llmConfig.__agentId || '', phase: 'chunk' });
-      return { success: false, error: `scnet error: ${resp.status} — ${errDetail}` };
+      return { success: false, http_status: resp.status, error: `scnet error: ${resp.status} — ${errDetail}` };
     }
 
     // 解析 scnet SSE 响应
@@ -1314,7 +1393,7 @@ const AgentEngine = {
       this._logLLM({ provider: 'chat-accumulation', model: llmConfig.model || '', status: resp.status,
         latency_ms: Date.now() - _llmT0, _rawInput: content,
         error: ('HTTP ' + resp.status + ' — ' + errDetail).slice(0, 500), agent_id: llmConfig.__agentId || '', phase: 'step' });
-      return { success: false, error: `Chat-Accumulation error: ${resp.status} — ${errDetail}` };
+      return { success: false, http_status: resp.status, error: `Chat-Accumulation error: ${resp.status} — ${errDetail}` };
     }
 
     const text = await resp.text();
@@ -1446,7 +1525,8 @@ const AgentEngine = {
       this._logLLM({ provider: llmConfig.provider, model: llmConfig.model, status: resp.status,
         latency_ms: Date.now() - _llmT0, msg_count: messages.length, _messages: messages,
         error: ('HTTP ' + resp.status + ' — ' + errDetail).slice(0, 500), agent_id: config.agent_id });
-      return { success: false, error: 'OpenCode error: ' + OC._opencodeErrorHint(resp.status, errDetail) + ` (model: ${llmConfig.model})` };
+      // [2026-09-06] http_status 供 _callLLMRetry 识别 429 限流（30s 指数退避重试）
+      return { success: false, http_status: resp.status, error: 'OpenCode error: ' + OC._opencodeErrorHint(resp.status, errDetail) + ` (model: ${llmConfig.model})` };
     }
 
     const contentType = (resp.headers.get('Content-Type') || '');

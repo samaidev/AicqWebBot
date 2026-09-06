@@ -276,15 +276,22 @@
     byId: {},
 
     card(d) {
+      // [2026-09-06] 工具调用卡片默认展开（选项卡式）：命令参数 + 返回结果直接可见，
+      // 仍可点击头部折叠。结构化为两段：input / output。
       const el = document.createElement('div');
-      el.className = 'tool-card';
+      el.className = 'tool-card open';
       const head = document.createElement('div');
       head.className = 'tc-head';
-      head.innerHTML = `<span>🛠</span><span class="tc-name">${UI.esc(d.name || 'tool')}</span><span class="tc-state">…</span>`;
+      head.innerHTML = `<span class="tc-arrow">▾</span><span>🛠</span><span class="tc-name">${UI.esc(d.name || 'tool')}</span><span class="tc-state">…</span>`;
       const body = document.createElement('div');
       body.className = 'tc-body';
-      body.innerHTML = `<b>input</b>\n${UI.esc(JSON.stringify(d.input || {}, null, 2))}`;
-      head.addEventListener('click', () => el.classList.toggle('open'));
+      body.innerHTML = `<div class="tc-sec"><b>⚙ input — command &amp; params</b>\n${UI.esc(JSON.stringify(d.input || {}, null, 2))}</div>`
+        + `<div class="tc-sec tc-out"><b>📤 output — result</b>\n<span class="tc-pending">running…</span></div>`;
+      head.addEventListener('click', () => {
+        el.classList.toggle('open');
+        const a = head.querySelector('.tc-arrow');
+        if (a) a.textContent = el.classList.contains('open') ? '▾' : '▸';
+      });
       el.appendChild(head); el.appendChild(body);
       return { el, body, stateEl: head.querySelector('.tc-state'), id: d.id || '' };
     },
@@ -295,8 +302,13 @@
       const ok = d.success !== false && !d.error;
       card.stateEl.textContent = ok ? '✓' : '✗';
       card.stateEl.className = 'tc-state ' + (ok ? 'ok' : 'err');
-      card.body.innerHTML = card.body.innerHTML.replace(/\n\n<b>output<\/b>[\s\S]*$/, '');
-      card.body.innerHTML += `\n\n<b>output</b>\n${UI.esc(String(d.output || d.error || '').slice(0, 4000))}`;
+      const out = card.body.querySelector('.tc-out');
+      if (out) {
+        out.innerHTML = `<b>📤 output — result</b>\n${UI.esc(String(d.output || d.error || '').slice(0, 4000))}`;
+      } else {
+        card.body.innerHTML = card.body.innerHTML.replace(/\n\n<b>output<\/b>[\s\S]*$/, '');
+        card.body.innerHTML += `\n\n<b>output</b>\n${UI.esc(String(d.output || d.error || '').slice(0, 4000))}`;
+      }
       UI.scroll();
     }
   };
@@ -400,8 +412,10 @@
       $('f_freeKey').value = llmc.api_key || '';
       $('f_sandbox').value = existing.sandbox_type || 'python';
       if (prov !== 'openai') await loadFreeModels(llmc.model || '');
+      else { $('f_apitype').value = (llmc.api_type === 'openai-response') ? 'openai-response' : 'openai-completion'; updateApiHint(); }
     } else {
       $('f_sandbox').value = 'python';   // Pyodide by default
+      updateApiHint();
       if (prov !== 'openai') await loadFreeModels('');
     }
   }
@@ -410,7 +424,17 @@
     const free = $('f_provider').value === 'opencode';
     $('grpFree').style.display = free ? 'block' : 'none';
     $('grpOpenAI').style.display = free ? 'none' : 'block';
+    if (!free) updateApiHint();
     if (free && !$('f_freeModel').options.length) loadFreeModels('');
+  }
+
+  // [2026-09-06] API 协议提示（Chat Completions vs Responses）
+  function updateApiHint() {
+    const el = $('f_apiHint');
+    if (!el) return;
+    el.textContent = $('f_apitype').value === 'openai-response'
+      ? '→ POST {base}/responses — OpenAI Responses API (native function calling, gpt-5.x)'
+      : '→ POST {base}/chat/completions — OpenAI Chat Completions API';
   }
 
   async function saveSetup(ev) {
@@ -441,17 +465,19 @@
       } else {
         llm = {
           provider: 'openai',
-          base_url: $('f_baseurl').value.trim().replace(/\/+$/, ''),
+          // [2026-09-06] 留空时默认官方端点；api_type = openai-completion | openai-response
+          base_url: ($('f_baseurl').value.trim() || 'https://api.openai.com/v1').replace(/\/+$/, ''),
           api_key: $('f_apikey').value.trim(),
           model: $('f_model').value.trim(),
+          api_type: $('f_apitype').value || 'openai-completion',
         };
       }
-      if (!isFree && (!llm.base_url || !llm.api_key || !llm.model)) {
-        throw new Error('base URL, model and API key are required for OpenAI-compatible providers');
+      if (!isFree && (!llm.api_key || !llm.model)) {
+        throw new Error('model and API key are required for OpenAI-compatible providers (base URL defaults to https://api.openai.com/v1)');
       }
       const config = {
         agent_id: agentId,
-        name: $('f_name').value.trim() || 'My Agent',
+        name: $('f_name').value.trim() || 'AicqWebBot',
         system_prompt: $('f_prompt').value.trim(),
         llm_config: llm,
         tools: selectedTools(),
@@ -477,7 +503,7 @@
   async function startChat(config) {
     $('setupPanel').classList.add('hidden');
     $('chatPanel').classList.remove('hidden');
-    $('agentName').textContent = config.name || 'Agent';
+    $('agentName').textContent = config.name || 'AicqWebBot';
     UI.cs = 'cs_' + Date.now();
     $('csLabel').textContent = 'session ' + UI.cs.slice(3, 11);
     currentAgentId = config.agent_id;
@@ -516,6 +542,7 @@
   $('f_provider').addEventListener('change', syncProvider);
   $('f_freeModel').addEventListener('change', updateFreeModelUI);
   $('f_freeModelCustom').addEventListener('input', updateFreeModelUI);
+  $('f_apitype').addEventListener('change', updateApiHint);
   $('btnSend').addEventListener('click', sendCurrent);
   $('inputBox').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCurrent(); }
@@ -559,6 +586,108 @@
     await import(_agUrl('agent-files.js'));
     window.openFileManager(currentAgentId);
   });
+
+  // ═══════════ 6c. History sessions panel ☰ ═══════════
+  // [2026-09-06] 列出 IndexedDB（agent-storage）里该 agent 的全部历史会话；
+  // 点击任一会话 → 回切（UI.cs = 该会话 id）并重放完整记录：
+  // 用户消息 / 智能体回复 / 工具调用卡片（含命令参数与返回结果）。
+  // 回切后继续在该会话里聊天：引擎按 sessionId 加载历史上下文，无缝续聊。
+  async function openHistory() {
+    if (!currentAgentId) return;
+    const AgentStorage = (await import(_agUrl('agent-storage.js'))).default;
+    const sessions = await AgentStorage.listSessions(currentAgentId);
+    document.getElementById('historyModal')?.remove();
+
+    const fmt = (iso) => {
+      try {
+        const d = new Date(iso);
+        return d.toLocaleString(undefined, { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+      } catch (e) { return iso || ''; }
+    };
+    const rows = sessions.length
+      ? sessions.map((s, i) => `
+          <div class="hist-row" data-sid="${UI.esc(s.session_id)}">
+            <div class="hist-title">${UI.esc(s.title || '(no text)')}</div>
+            <div class="hist-meta">${s.message_count} msgs · ${fmt(s.last_at)} · <code>${UI.esc(s.session_id.slice(0, 13))}</code></div>
+          </div>`).join('')
+      : '<p style="color:var(--muted);font-size:13px;padding:8px 0">No sessions yet. Start chatting — every session is stored locally in your browser (IndexedDB) and listed here.</p>';
+
+    const modal = document.createElement('div');
+    modal.className = 'modal-overlay';
+    modal.id = 'historyModal';
+    modal.innerHTML = `
+      <div class="modal">
+        <h3>🕘 History sessions</h3>
+        <p style="font-size:12px;color:var(--muted);margin:2px 0 12px">All sessions live in your browser's IndexedDB. Click one to switch back and continue it.</p>
+        <div class="hist-list">${rows}</div>
+        <div class="btn-row" style="margin-top:16px">
+          <button class="btn-secondary" id="btnHistClose">Close</button>
+        </div>
+      </div>`;
+    document.body.appendChild(modal);
+    modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+    modal.querySelector('#btnHistClose').onclick = () => modal.remove();
+    modal.querySelectorAll('.hist-row').forEach(row => {
+      row.addEventListener('click', () => loadHistorySession(row.dataset.sid));
+    });
+  }
+
+  // 回切并重放某个历史会话的完整记录
+  async function loadHistorySession(sessionId) {
+    if (!sessionId || !currentAgentId) return;
+    const AgentStorage = (await import(_agUrl('agent-storage.js'))).default;
+    const records = await AgentStorage.getConversations(currentAgentId, sessionId, 0);
+    document.getElementById('historyModal')?.remove();
+
+    UI.cs = sessionId;   // 关键：继续该会话（引擎按此 sessionId 取历史上下文）
+    $('csLabel').textContent = 'session ' + sessionId.slice(3, 11);
+    UI.reset();
+    $('msgFlow').innerHTML = '';
+
+    const pending = {};   // tool_call_id → card（role:'tool' 记录回填结果用）
+    const textOf = (c) => {
+      if (typeof c === 'string') return c;
+      if (Array.isArray(c)) return c.filter(p => p && p.type === 'text').map(p => p.text || '').join('\n');
+      return JSON.stringify(c || '');
+    };
+    for (const m of records) {
+      if (!m || !m.role) continue;
+      if (m.role === 'user') {
+        const t = textOf(m.content);
+        if (t) UI.addUser(t);
+      } else if (m.role === 'assistant') {
+        const t = textOf(m.content);
+        if (t && t.trim()) {
+          const el = document.createElement('div');
+          el.className = 'msg agent';
+          el.innerHTML = UI.md(t);
+          $('msgFlow').appendChild(el);
+        }
+        if (Array.isArray(m.tool_calls)) {
+          for (const tc of m.tool_calls) {
+            let args = {};
+            try { args = JSON.parse(tc.function?.arguments || '{}'); } catch (e) {}
+            const card = Tools.card({ name: tc.function?.name || 'tool', input: args, id: tc.id || '' });
+            $('msgFlow').appendChild(card.el);
+            pending[tc.id || ''] = card;
+          }
+        }
+      } else if (m.role === 'tool') {
+        const card = pending[m.tool_call_id || ''];
+        if (card) {
+          const ok = !String(m.content || '').startsWith('Error');
+          card.stateEl.textContent = ok ? '✓' : '✗';
+          card.stateEl.className = 'tc-state ' + (ok ? 'ok' : 'err');
+          const out = card.body.querySelector('.tc-out');
+          if (out) out.innerHTML = `<b>📤 output — result</b>\n${UI.esc(String(m.content || '').slice(0, 4000))}`;
+        }
+      }
+    }
+    UI.scroll();
+    console.log('[AicqWebBot] history session loaded:', sessionId, records.length, 'records');
+  }
+
+  $('btnHistory').addEventListener('click', openHistory);
 
   (async function boot() {
     // wait (max 1.5s) for static/relay mode detection before first render

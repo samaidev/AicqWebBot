@@ -1443,34 +1443,73 @@ const AgentToolsNative = {
   },
 
   // ── upload-file ──
+  // [FIX 2026-09-06] 原实现在无头环境/用户取消时会永久挂起（promise 永不 resolve，
+  // 卡死整个 agent 循环 45s+）。补 oncancel 监听 + 90s 兑底超时。
   async upload_file(args, ctx) {
     return new Promise((resolve) => {
+      let settled = false;
+      const done = (r) => { if (!settled) { settled = true; clearTimeout(timer); resolve(r); } };
+      const timer = setTimeout(() => done({ success: false, error: 'Upload timed out: no file selected within 60s (file dialog dismissed or not supported in this environment).' }), 60000);
       const input = document.createElement('input');
       input.type = 'file';
       input.onchange = async (e) => {
         const file = e.target.files[0];
-        if (!file) { resolve({ success: false, error: 'No file selected' }); return; }
-        const buf = await file.arrayBuffer();
-        const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
-        await AgentStorage.saveFile(ctx.agentId, args.dest_path, buf);
-        resolve({ success: true, output: `File uploaded to ${args.dest_path} (${file.size} bytes)` });
+        if (!file) { done({ success: false, error: 'No file selected' }); return; }
+        try {
+          const buf = await file.arrayBuffer();
+          const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+          await AgentStorage.saveFile(ctx.agentId, args.dest_path, buf);
+          done({ success: true, output: `File uploaded to ${args.dest_path} (${file.size} bytes)` });
+        } catch (err) { done({ success: false, error: 'Upload failed: ' + err.message }); }
       };
+      if (typeof input.oncancel !== 'undefined') input.oncancel = () => done({ success: false, error: 'Upload cancelled by user (no file selected).' });
       input.click();
     });
   },
 
   // ── weather ──
+  // [FIX 2026-09-06] 原实现拉 wttr.in 的 j1 大 JSON（>40KB），被 web-proxy 的
+  // 20000 字符截断后 JSON.parse 必炸（"Unterminated string at position 20000"）。
+  // 改用紧凑文本格式（单行、无 JSON），另保留 j1 兜底 + 容错解析。
   async weather(args, ctx) {
-    const url = `https://wttr.in/${encodeURIComponent(args.location)}?format=j1`;
+    const loc = encodeURIComponent(args.location);
+    const proxy = (url) => this._proxyBody(url, ctx, { 'User-Agent': 'curl/8.0' });
+    // 1) 紧凑单行格式："Smoky haze, +25°C, humidity 62%, wind ↖8km/h"
+    try {
+      const body = await proxy(`https://wttr.in/${loc}?format=%C,+%t,+humidity+%h,+wind+%w&m`);
+      if (body && !body.trim().startsWith('<') && !/Unknown|ERROR/i.test(body.slice(0, 60))) {
+        return { success: true, output: `${args.location}: ${body.trim().slice(0, 300)}` };
+      }
+    } catch (e) { /* fall through */ }
+    // 2) 兑底 j1 JSON（截断容错：只解析 current_condition 头部）
+    try {
+      const body = await proxy(`https://wttr.in/${loc}?format=j1`);
+      let cur = {};
+      try { cur = (JSON.parse(body).current_condition || [])[0] || {}; }
+      catch (e2) {
+        const m = body.match(/"temp_C":"(-?\d+)"/);
+        const d = body.match(/"weatherDesc":\[\{"value":"([^"]+)"/);
+        const h = body.match(/"humidity":"(\d+)"/);
+        if (m) cur = { temp_C: m[1], weatherDesc: [{ value: d ? d[1] : '?' }], humidity: h ? h[1] : '?' };
+      }
+      if (cur.temp_C !== undefined) {
+        return { success: true, output: `${args.location}: ${cur.weatherDesc?.[0]?.value || '?'}, ${cur.temp_C}°C, Humidity ${cur.humidity}%` };
+      }
+      return { success: false, error: `Weather data unavailable for ${args.location} (upstream returned no parseable data)` };
+    } catch (e) {
+      return { success: false, error: `Weather fetch failed: ${e.message}` };
+    }
+  },
+
+  // web-proxy POST 的公共小封装（返回 body 文本；可覆盖请求头）
+  async _proxyBody(url, ctx, extraHeaders) {
     const resp = await fetch('/api/v1/agent/web-proxy', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._authToken(ctx) },
-      body: JSON.stringify({ url, mode: 'raw' })
+      body: JSON.stringify({ url, mode: 'raw', headers: extraHeaders || {} })
     });
-    if (!resp.ok) return { success: false, error: 'Weather fetch failed' };
+    if (!resp.ok) throw new Error('proxy ' + resp.status);
     const data = await resp.json();
-    const w = JSON.parse(data.body);
-    const cur = w.current_condition?.[0] || {};
-    return { success: true, output: `${args.location}: ${cur.weatherDesc?.[0]?.value || '?'}, ${cur.temp_C}°C, Humidity ${cur.humidity}%, Wind ${cur.windspeedKmph}km/h` };
+    return data.body || '';
   },
 
   // ── export-data ──

@@ -137,11 +137,13 @@ async def search_proxy(request: Request):
         results = []
         engines = []
         if engine in ("bing",):
-            engines = [_search_bing]
+            engines = [_search_bing, _search_bing_cn]
+        elif engine in ("baidu",):
+            engines = [_search_baidu]
         elif engine in ("duckduckgo", "ddg"):
             engines = [_search_ddg]
-        else:  # auto: ddg -> ddg-lite -> bing
-            engines = [_search_ddg, _search_ddg_lite, _search_bing]
+        else:  # auto: ddg -> ddg-lite -> bing -> cn.bing -> baidu（后两档保证中国大陆容器可用）
+            engines = [_search_ddg, _search_ddg_lite, _search_bing, _search_bing_cn, _search_baidu]
         for fn in engines:
             try:
                 results = await fn(query)
@@ -162,11 +164,13 @@ async def _search_ddg(query: str) -> list:
     async with httpx.AsyncClient(timeout=25, headers={"User-Agent": UA}, follow_redirects=True) as c:
         r = await c.post("https://html.duckduckgo.com/html/", data={"q": query})
     results = []
-    for m in re.finditer(
-            r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>.*?'
-            r'(?:class="result__snippet"[^>]*>(.*?)</a>)?',
-            r.text, re.S):
-        url = m.group(1)
+    # [FIX 2026-09-06] 先切结果块再在块内抽摘要——旧正则的贪婪/可选组组合导致 summary 恒为空
+    for block in re.finditer(r'<div[^>]+class="[^"]*result[^"]*"[^"]*>.*?(?=<div[^>]+class="[^"]*result|<div class="nav-link")', r.text, re.S):
+        b = block.group(0)
+        a = re.search(r'<a[^>]+class="result__a"[^>]+href="([^"]+)"[^>]*>(.*?)</a>', b, re.S)
+        if not a:
+            continue
+        url = a.group(1)
         # DDG wraps links through a redirector — unwrap
         if "uddg=" in url:
             from urllib.parse import urlparse, parse_qs, unquote
@@ -174,7 +178,8 @@ async def _search_ddg(query: str) -> list:
                 url = unquote(parse_qs(urlparse(url).query).get("uddg", [url])[0])
             except Exception:
                 pass
-        results.append({"title": _clean(m.group(2)), "url": url, "summary": _clean(m.group(3))})
+        snip = re.search(r'class="result__snippet"[^>]*>(.*?)</a>', b, re.S)
+        results.append({"title": _clean(a.group(2)), "url": url, "summary": _clean(snip.group(1)) if snip else ""})
         if len(results) >= 10:
             break
     return results
@@ -196,14 +201,61 @@ async def _search_ddg_lite(query: str) -> list:
     return results
 
 
+def _parse_bing_algo(html: str) -> list:
+    """b_algo 块解析——www.bing.com 与 cn.bing.com 通用（[FIX 2026-09-06]）。"""
+    results = []
+    for block in re.finditer(r'<li class="b_algo"[^>]*>(.*?)(?=<li class="b_algo|<li class="b_msg|</ol>)', html, re.S):
+        b = block.group(1)
+        a = re.search(r'<h2[^>]*><a[^>]+href="(http[^"]+)"[^>]*>(.*?)</a>', b, re.S)
+        if not a:
+            continue
+        snip = re.search(r'<p[^>]*class="[^"]*b_lineclamp[^"]*"[^>]*>(.*?)</p>|<div[^>]*class="b_caption"[^>]*>.*?<p[^>]*>(.*?)</p>', b, re.S)
+        summary = ""
+        if snip:
+            summary = snip.group(1) or snip.group(2) or ""
+        results.append({"title": _clean(a.group(2)), "url": a.group(1), "summary": _clean(summary)})
+        if len(results) >= 10:
+            break
+    return results
+
+
 async def _search_bing(query: str) -> list:
     async with httpx.AsyncClient(timeout=25, headers={"User-Agent": UA}, follow_redirects=True) as c:
         r = await c.get("https://www.bing.com/search", params={"q": query, "count": "10"})
+    # 新版 b_algo 解析；空则回退旧 h2 正则
+    results = _parse_bing_algo(r.text)
+    if not results:
+        for m in re.finditer(
+                r'<h2><a href="(http[^"]+)"[^>]*>(.*?)</a></h2>.*?<p[^>]*>(.*?)</p>',
+                r.text, re.S):
+            results.append({"title": _clean(m.group(2)), "url": m.group(1), "summary": _clean(m.group(3))})
+            if len(results) >= 10:
+                break
+    return results
+
+
+async def _search_bing_cn(query: str) -> list:
+    """cn.bing.com —— 中国大陆可达（[FIX 2026-09-06] 国内容器搜索失败的兜底）。"""
+    async with httpx.AsyncClient(timeout=25, headers={"User-Agent": UA}, follow_redirects=True) as c:
+        r = await c.get("https://cn.bing.com/search", params={"q": query, "count": "10"})
+    return _parse_bing_algo(r.text)
+
+
+async def _search_baidu(query: str) -> list:
+    """百度网页搜索 —— 中国大陆最稳的免 key 引擎（[FIX 2026-09-06] 新增）。"""
+    async with httpx.AsyncClient(timeout=25, headers={"User-Agent": UA}, follow_redirects=True) as c:
+        r = await c.get("https://www.baidu.com/s", params={"wd": query, "rn": "10"})
     results = []
-    for m in re.finditer(
-            r'<h2><a href="(http[^"]+)"[^>]*>(.*?)</a></h2>.*?<p[^>]*>(.*?)</p>',
-            r.text, re.S):
-        results.append({"title": _clean(m.group(2)), "url": m.group(1), "summary": _clean(m.group(3))})
+    for block in re.finditer(r'<div[^>]+class="result[^"]*c-container[^"]*"[^>]*>(.*?)(?=<div[^>]+class="result|<div id="page")', r.text, re.S):
+        b = block.group(1)
+        a = re.search(r'<h3[^>]*>\s*<a[^>]+href="(http[^"]+)"[^>]*>(.*?)</a>', b, re.S)
+        if not a:
+            continue
+        snip = (re.search(r'class="[^"]*c-abstract[^"]*"[^>]*>(.*?)</div>', b, re.S)
+                or re.search(r'class="[^"]*content-right[^"]*"[^>]*>(.*?)</span>', b, re.S)
+                or re.search(r'<span[^>]*class="[^"]*"[^>]*>([^<]{30,}?)</span>', b, re.S))
+        results.append({"title": _clean(a.group(2)), "url": a.group(1),
+                        "summary": _clean(snip.group(1)) if snip else ""})
         if len(results) >= 10:
             break
     return results

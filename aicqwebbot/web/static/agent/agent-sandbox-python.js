@@ -44,14 +44,48 @@ const AgentSandboxPython = {
     pyodide.setStdout({ batched: (text) => { output += text + '\n'; } });
     pyodide.setStderr({ batched: (text) => { output += text + '\n'; } });
 
-    try {
-      await pyodide.runPythonAsync(args.code || '');
-      // 持久化文件系统
-      await this._saveFS(ctx.agentId);
-      return { success: true, output: output.slice(0, 8000) || 'Code executed (no output).' };
-    } catch(e) {
-      return { success: false, error: e.message, output: output };
+    // [FIX 2026-09-06] 缺包自动安装重试：ModuleNotFoundError: No module named 'X'
+    // → micropip/loadPackage 安装后自动重跑一次（每次会话每个包只试一次）。
+    // data-analysis / csv-process / install-package 及 LLM 生成的 pandas 代码因此开箱即用。
+    this._autoInstalled = this._autoInstalled || new Set();
+    let result = null;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        await pyodide.runPythonAsync(args.code || '');
+        result = { success: true, output: output.slice(0, 8000) || 'Code executed (no output).' };
+        break;
+      } catch(e) {
+        const m = /ModuleNotFoundError: No module named '([A-Za-z0-9_.-]+)'/.exec(e.message || '');
+        if (m && attempt === 0) {
+          const pkg = m[1].split('.')[0];
+          if (!this._autoInstalled.has(pkg)) {
+            this._autoInstalled.add(pkg);
+            output += `[auto-install] ${pkg} not found — installing via micropip...\n`;
+            try {
+              // Pyodide 发行版内置包走 loadPackage（快），纯 Python 包走 micropip
+              const known = ['pandas','numpy','matplotlib','scipy','sympy','regex','pillow',
+                'beautifulsoup4','lxml','openpyxl','python-pptx','reportlab','fsspec'];
+              if (known.includes(pkg)) await pyodide.loadPackage(pkg);
+              else await pyodide.runPythonAsync(`import micropip; await micropip.install('${pkg.replace(/'/g, '')}')`);
+              output += `[auto-install] ${pkg} installed — retrying code.\n`;
+              output = '';
+              pyodide.setStdout({ batched: (text) => { output += text + '\n'; } });
+              pyodide.setStderr({ batched: (text) => { output += text + '\n'; } });
+              continue;
+            } catch (ie) {
+              return { success: false, error: `${e.message}\n[auto-install] failed for '${pkg}': ${ie.message}`, output };
+            }
+          }
+        }
+        return { success: false, error: e.message, output: output };
+      }
     }
+    // 持久化文件系统
+    if (result) {
+      await this._saveFS(ctx.agentId);
+      return result;
+    }
+    return { success: false, error: 'execution did not produce a result', output };
   },
 
   async installPackage(packageName, ctx) {

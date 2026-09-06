@@ -831,6 +831,19 @@
     if (url.includes('/api/v1/agent/search-proxy')) {
       try {
         const q = (JSON.parse(init && init.body || '{}').query) || '';
+        // [2026-09-06] 首选 aicq.me 公共搜索中继（生产多引擎竞速：bing/360/ddg/
+        // baidu/brave/toutiao，真实结果）；DDG IA API 只是最后兜底（它不是真搜索）。
+        try {
+          const r0 = await RealFetch('https://aicq.me/api/v1/public/search-relay', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ query: q }),
+          });
+          if (r0.ok) {
+            const d0 = await r0.json();
+            if (Array.isArray(d0.results) && d0.results.length) return jsonResp({ results: d0.results });
+          }
+        } catch (e) { /* relay unreachable — fall back below */ }
         const r = await RealFetch('https://api.duckduckgo.com/?format=json&no_html=1&skip_disambig=1&q=' + encodeURIComponent(q));
         const d = await r.json();
         const results = (d.RelatedTopics || [])

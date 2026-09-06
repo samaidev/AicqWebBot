@@ -26,6 +26,21 @@
 
   function _agUrl(name) { return `/static/agent/${name}?v=${AGENT_VER}`; }
 
+  // ═══════════ 0. Theme — light (day) is the default ═══════════
+
+  const THEME_KEY = 'aicqwebbot_theme';
+  let THEME = 'light';
+  function applyTheme(t) {
+    THEME = (t === 'dark') ? 'dark' : 'light';
+    document.documentElement.dataset.theme = THEME;
+    try { localStorage.setItem(THEME_KEY, THEME); } catch (e) {}
+    const b = $('btnTheme');
+    if (b) b.textContent = THEME === 'dark' ? '☀️' : '🌙';
+  }
+  try { applyTheme(localStorage.getItem(THEME_KEY) === 'dark' ? 'dark' : 'light'); }
+  catch (e) { applyTheme('light'); }
+  $('btnTheme').addEventListener('click', () => applyTheme(THEME === 'dark' ? 'light' : 'dark'));
+
   // ═══════════ 1. LocalBus — the engine's "WebSocket" ═══════════
 
   class LocalBus {
@@ -218,6 +233,62 @@
 
   // ═══════════ 4. Setup panel ═══════════
 
+  // ── OpenCode free-model catalog — powered by the bundle's provider module ──
+  // (agent-llm-providers.js: dynamic /models catalog + static fallback +
+  //  /responses vs /chat/completions auto-routing by model prefix)
+  const OC_FALLBACK_MODELS = [
+    { id: 'nemotron-3-ultra-free',       label: 'Nemotron 3 Ultra (Free)' },
+    { id: 'nemotron-3.5-lightning-free', label: 'Nemotron 3.5 Lightning (Free)' },
+    { id: 'laguna-s-2.1-free',           label: 'Laguna S 2.1 (Free)' },
+    { id: 'mimo-v2.5-free',              label: 'MiMo-V2.5 (Free)' },
+    { id: 'deepseek-v4-flash-free',      label: 'DeepSeek V4 Flash (Free)' },
+    { id: 'muse-spark-1.3-contributor-free', label: 'Muse Spark 1.3 Contributor (Free)' },
+  ];
+  const OC_DEFAULT_BASE = 'https://opencode.ai/zen/v1';
+  const ocApiTypeFor = (m) => /^(gpt-|grok-|muse-spark-)/.test(m || '') ? 'response' : 'openai-completion';
+  let OC_MOD = null; // agent-llm-providers.js module ref
+
+  function renderFreeModels(selected) {
+    const sel = $('f_freeModel');
+    const models = (OC_MOD && OC_MOD._ocAllModels) ? OC_MOD._ocAllModels() : OC_FALLBACK_MODELS;
+    sel.innerHTML = models.map(m => `<option value="${m.id}">${m.label}</option>`).join('')
+      + '<option value="__custom__">Custom model ID…</option>';
+    if (selected && models.some(m => m.id === selected)) {
+      sel.value = selected;
+    } else if (selected) {
+      sel.value = '__custom__';
+      $('f_freeModelCustom').value = selected;
+    } else {
+      sel.value = (models[0] && models[0].id) || '';
+    }
+    updateFreeModelUI();
+  }
+
+  function updateFreeModelUI() {
+    const custom = $('f_freeModel').value === '__custom__';
+    $('f_freeModelCustomGroup').style.display = custom ? 'block' : 'none';
+    const model = custom ? $('f_freeModelCustom').value.trim() : $('f_freeModel').value;
+    $('f_ocApiHint').textContent = model
+      ? ('→ ' + (ocApiTypeFor(model) === 'response' ? '/responses (OpenAI Responses API)' : '/chat/completions (OpenAI Chat API)'))
+      : '';
+  }
+
+  async function loadFreeModels(selected) {
+    try { OC_MOD = await import(_agUrl('agent-llm-providers.js')); } catch (e) { OC_MOD = null; }
+    renderFreeModels(selected);
+    // dynamic /models refresh: via the local relay (pip mode); silently
+    // falls back to the built-in catalog when direct (static hosting)
+    if (OC_MOD && OC_MOD.fetchOpenCodeModels) {
+      OC_MOD.fetchOpenCodeModels(false).then(cat => {
+        if (!cat) return;
+        const cur = $('f_freeModel').value === '__custom__'
+          ? ($('f_freeModelCustom').value.trim() || selected || '')
+          : ($('f_freeModel').value || selected || '');
+        renderFreeModels(cur);
+      });
+    }
+  }
+
   async function loadToolChips(selected) {
     const mod = await import(_agUrl('agent-tools.js'));
     const all = (mod.default.ALL_TOOLS || []).map(t => t.name);
@@ -241,24 +312,26 @@
     $('setupPanel').classList.remove('hidden');
     $('chatPanel').classList.add('hidden');
     await loadToolChips(existing && existing.tools ? existing.tools : DEFAULT_TOOLS);
-    const isStatic = !!window.__STATIC_MODE;
-    const prov = existing && existing.llm_config ? (existing.llm_config.provider || 'opencode') : (isStatic ? 'openai' : 'opencode');
-    $('f_provider').value = (prov === 'opencode' && !isStatic) ? 'opencode' : 'openai';
+    const llmc = (existing && existing.llm_config) || {};
+    const prov = llmc.provider || 'opencode';   // free models = zero-config default
+    $('f_provider').value = (prov === 'openai') ? 'openai' : 'opencode';
     syncProvider();
-    if (isStatic) {
-      // static hosting: no local relay — the free anonymous provider cannot be
-      // reached directly (its API blocks browser CORS), so hide that option
-      $('f_provider').querySelector('option[value="opencode"]').disabled = true;
-    }
+    // static hosting: free OpenCode models need the local relay (their API
+    // sends no CORS headers) — say so honestly; BYOK to CORS-open endpoints
+    // still works directly from the browser
+    $('staticNote').classList.toggle('hidden', !window.__STATIC_MODE);
     if (existing) {
       $('f_name').value = existing.name || '';
       $('f_prompt').value = existing.system_prompt || '';
-      $('f_baseurl').value = (existing.llm_config && existing.llm_config.base_url) || '';
-      $('f_model').value = (existing.llm_config && existing.llm_config.model) || '';
-      $('f_apikey').value = (existing.llm_config && existing.llm_config.api_key) || '';
-      $('f_freeKey').value = (existing.llm_config && existing.llm_config.api_key) || '';
-      if (existing.llm_config && existing.llm_config.model) $('f_freeModel').value = existing.llm_config.model;
-      $('f_sandbox').value = existing.sandbox_type || 'javascript';
+      $('f_baseurl').value = llmc.base_url || '';
+      $('f_model').value = llmc.model || '';
+      $('f_apikey').value = llmc.api_key || '';
+      $('f_freeKey').value = llmc.api_key || '';
+      $('f_sandbox').value = existing.sandbox_type || 'python';
+      if (prov !== 'openai') await loadFreeModels(llmc.model || '');
+    } else {
+      $('f_sandbox').value = 'python';   // Pyodide by default
+      if (prov !== 'openai') await loadFreeModels('');
     }
   }
 
@@ -266,6 +339,7 @@
     const free = $('f_provider').value === 'opencode';
     $('grpFree').style.display = free ? 'block' : 'none';
     $('grpOpenAI').style.display = free ? 'none' : 'block';
+    if (free && !$('f_freeModel').options.length) loadFreeModels('');
   }
 
   async function saveSetup(ev) {
@@ -281,17 +355,26 @@
         localStorage.setItem(AGENT_ID_KEY, agentId);
       }
       const isFree = $('f_provider').value === 'opencode';
-      const llm = isFree ? {
-        provider: 'opencode',
-        base_url: '',                      // engine default: opencode.ai/zen/v1
-        api_key: $('f_freeKey').value.trim(),
-        model: $('f_freeModel').value,
-      } : {
-        provider: 'openai',
-        base_url: $('f_baseurl').value.trim().replace(/\/+$/, ''),
-        api_key: $('f_apikey').value.trim(),
-        model: $('f_model').value.trim(),
-      };
+      let llm;
+      if (isFree) {
+        const custom = $('f_freeModel').value === '__custom__';
+        const model = custom ? $('f_freeModelCustom').value.trim() : $('f_freeModel').value;
+        if (!model) throw new Error('choose or enter a model');
+        llm = {
+          provider: 'opencode',
+          base_url: (OC_MOD && OC_MOD.OPENCODE_BASE_URL) || OC_DEFAULT_BASE,
+          api_key: $('f_freeKey').value.trim(),
+          model: model,
+          api_type: (OC_MOD && OC_MOD._ocApiTypeForModel) ? OC_MOD._ocApiTypeForModel(model) : ocApiTypeFor(model),
+        };
+      } else {
+        llm = {
+          provider: 'openai',
+          base_url: $('f_baseurl').value.trim().replace(/\/+$/, ''),
+          api_key: $('f_apikey').value.trim(),
+          model: $('f_model').value.trim(),
+        };
+      }
       if (!isFree && (!llm.base_url || !llm.api_key || !llm.model)) {
         throw new Error('base URL, model and API key are required for OpenAI-compatible providers');
       }
@@ -360,6 +443,8 @@
 
   $('setupForm').addEventListener('submit', saveSetup);
   $('f_provider').addEventListener('change', syncProvider);
+  $('f_freeModel').addEventListener('change', updateFreeModelUI);
+  $('f_freeModelCustom').addEventListener('input', updateFreeModelUI);
   $('btnSend').addEventListener('click', sendCurrent);
   $('inputBox').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCurrent(); }
@@ -421,12 +506,23 @@
 
   async function shimProxy(url, init) {
     if (url.includes('/api/v1/agent/llm-proxy')) {
+      let p;
+      try { p = JSON.parse(init && init.body || '{}'); }
+      catch (e) { return jsonResp({ error: 'bad proxy request: ' + e }, 400); }
       try {
-        const p = JSON.parse(init && init.body || '{}');
-        return RealFetch(p.target_url, {
+        return await RealFetch(p.target_url, {
           method: p.method || 'POST', headers: p.headers || {}, body: p.body,
         });
-      } catch (e) { return jsonResp({ error: 'bad proxy request: ' + e }, 400); }
+      } catch (e) {
+        // Direct connect failed — almost always browser CORS (e.g. opencode.ai
+        // sends no Access-Control-Allow-Origin). Be honest about the shape:
+        // the local relay (pip form) has no such limitation.
+        const hint = 'Direct browser connection blocked (CORS or offline). '
+          + 'Free OpenCode models need the local relay — pip install aicqwebbot, '
+          + 'then aicqwebbot.run(8386) — or point an OpenAI-compatible key at a '
+          + 'CORS-open endpoint (works directly here).';
+        return jsonResp({ error: hint }, 502);
+      }
     }
     if (url.includes('/api/v1/agent/search-proxy')) {
       try {

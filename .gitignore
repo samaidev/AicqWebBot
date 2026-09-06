@@ -1,0 +1,10 @@
+# AicqWebBot ships Python sources — the repo-root *.py ignore (legacy rule
+# for the removed old server) must NOT swallow this package.
+!*.py
+
+# Build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/

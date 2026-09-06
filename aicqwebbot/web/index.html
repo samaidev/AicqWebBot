@@ -10,6 +10,9 @@
 </head>
 <body>
 
+<!-- ═══════════ Theme toggle (global, both panels) ═══════════ -->
+<button id="btnTheme" title="Toggle light / dark theme" aria-label="Toggle theme">🌙</button>
+
 <!-- ═══════════ Setup panel (shown when no agent configured) ═══════════ -->
 <div id="setupPanel" class="panel">
   <div class="setup-card">
@@ -42,11 +45,13 @@
       </div>
 
       <div id="grpFree">
-        <label>Model</label>
-        <select id="f_freeModel">
-          <option value="nemotron-3.5-lightning-free">Nemotron 3.5 Lightning (Free)</option>
-          <option value="nemotron-3-ultra-free">Nemotron 3 Ultra (Free)</option>
-        </select>
+        <label>Model <span class="hint">— free models first, no key needed</span></label>
+        <select id="f_freeModel"><option value="">loading…</option></select>
+        <div id="f_freeModelCustomGroup" class="custom-model-group" style="display:none">
+          <label>Custom model ID</label>
+          <input id="f_freeModelCustom" type="text" placeholder="e.g. gpt-5.4-mini">
+        </div>
+        <div id="f_ocApiHint" class="api-hint"></div>
         <label>API key <span class="hint">— optional, anonymous works</span></label>
         <input id="f_freeKey" type="password" placeholder="(optional)">
       </div>
@@ -55,8 +60,8 @@
         <div>
           <label>Code sandbox</label>
           <select id="f_sandbox">
+            <option value="python" selected>Python (Pyodide)</option>
             <option value="javascript">JavaScript (QuickJS)</option>
-            <option value="python">Python (Pyodide)</option>
           </select>
         </div>
         <div>
@@ -71,6 +76,7 @@
       <label class="tools-label">Tools <span class="hint">— click to toggle</span></label>
       <div id="f_tools" class="tools-grid"></div>
 
+      <div id="staticNote" class="static-note hidden">Static hosting: free OpenCode models are relayed by a local server. Run <code>pip install aicqwebbot</code> + <code>aicqwebbot.run(8386)</code> for the full experience — here, use your own OpenAI-compatible key (CORS-open endpoints work directly).</div>
       <button type="submit" class="btn-primary" id="btnSave">Save &amp; Start Chat</button>
       <p class="foot">Agent state lives in your browser (IndexedDB) · Server is a stateless relay · <a href="https://github.com/samaidev/AicqWebBot" target="_blank">GitHub</a> · <a href="https://aicq.me" target="_blank">aicq.me</a></p>
     </form>

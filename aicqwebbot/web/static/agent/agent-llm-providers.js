@@ -21,18 +21,25 @@ const OPENCODE_MODELS = {
   'openai-completion': [
     { id: 'nemotron-3-ultra-free',       label: 'Nemotron 3 Ultra (Free)' },
     { id: 'nemotron-3.5-lightning-free', label: 'Nemotron 3.5 Lightning (Free)' },
-    { id: 'laguna-s-2.1-free',           label: 'Laguna S 2.1 (Free)' },
-    { id: 'mimo-v2.5-free',              label: 'MiMo-V2.5 (Free)' },
-    { id: 'deepseek-v4-flash-free',      label: 'DeepSeek V4 Flash (Free)' }
+    { id: 'ling-3.0-flash-fin-free',     label: 'Ling 3.0 Flash Fin (Free)' },
+    { id: 'mimo-v2.5-free',              label: 'MiMo-V2.5 (Free, rate-limited sometimes)' }
   ],
   'response': [
-    { id: 'muse-spark-1.3-contributor-free', label: 'Muse Spark 1.3 Contributor (Free)' },
-    { id: 'muse-spark-1.2-contributor-free', label: 'Muse Spark 1.2 Contributor (Free)' },
-    { id: 'gpt-5.4-nano',                    label: 'GPT 5.4 Nano (需 API Key)' },
-    { id: 'gpt-5.4-mini',                    label: 'GPT 5.4 Mini (需 API Key)' },
-    { id: 'grok-build-0.1',                  label: 'Grok Build 0.1 (需 API Key)' }
+    { id: 'muse-spark-1.3-contributor-free', label: 'Muse Spark 1.3 Contributor (Free, region-locked in some regions)' },
+    { id: 'gpt-5.4-nano',                    label: 'GPT 5.4 Nano (needs API Key)' },
+    { id: 'gpt-5.4-mini',                    label: 'GPT 5.4 Mini (needs API Key)' },
+    { id: 'grok-build-0.1',                  label: 'Grok Build 0.1 (needs API Key)' }
   ]
 };
+
+// [2026-09-06] Verified dead / retired models — filtered out of BOTH the dynamic
+// catalog and the static fallback. GET /models still lists them, but selecting
+// one only produces an immediate upstream error.
+const OC_DEAD_MODELS = new Set([
+  'laguna-s-2.1-free',              // "Model is not supported" (live test 2026-09-06)
+  'deepseek-v4-flash-free',         // "Model is unavailable" (live test 2026-09-06)
+  'muse-spark-1.2-contributor-free' // retired upstream, only 1.3 remains
+]);
 
 // ═══ [2026-09-03] 动态模型目录 — 实时同步 GET {base}/models ═══
 const OC_MODELS_CACHE_KEY = 'aicq_oc_zen_models_v1';
@@ -68,6 +75,7 @@ function _ocBuildCatalog(modelIds) {
   const cat = { 'openai-completion': [], 'response': [] };
   for (const id of modelIds) {
     if (!id || typeof id !== 'string') continue;
+    if (OC_DEAD_MODELS.has(id)) continue;   // [2026-09-06] skip dead upstream models
     const kind = _ocEndpointKind(id);
     if (kind === 'unsupported' || !cat[kind]) continue;
     cat[kind].push({ id, label: _ocModelLabel(id), free: id.endsWith('-free') });
@@ -143,7 +151,7 @@ async function fetchOpenCodeModels(force) {
 function _ocModelsForType(apiType) {
   const dyn = _ocActiveCatalog();
   if (dyn && dyn[apiType] && dyn[apiType].length) return dyn[apiType];
-  return OPENCODE_MODELS[apiType] || [];
+  return (OPENCODE_MODELS[apiType] || []).filter(m => !OC_DEAD_MODELS.has(m.id));
 }
 
 // [2026-09-03d] 全量模型列表 — 合并两种端点分组，free 优先、组内保持上游顺序。
@@ -151,7 +159,8 @@ function _ocModelsForType(apiType) {
 function _ocAllModels() {
   const cat = _ocActiveCatalog() || OPENCODE_MODELS;
   const all = (cat['openai-completion'] || []).concat(cat['response'] || []);
-  return all.filter(m => m && m.id && m.free).concat(all.filter(m => m && m.id && !m.free));
+  return all.filter(m => m && m.id && !OC_DEAD_MODELS.has(m.id) && m.free)
+    .concat(all.filter(m => m && m.id && !OC_DEAD_MODELS.has(m.id) && !m.free));
 }
 
 // [2026-09-03d] 由模型 ID 自动匹配 API 类型：
@@ -361,10 +370,9 @@ function _opencodeErrorHint(status, bodyText) {
 // 与静态目录 OPENCODE_MODELS['openai-completion'] 保持同步。
 const OC_FAILOVER_POOL = [
   'nemotron-3-ultra-free',
-  'laguna-s-2.1-free',
   'nemotron-3.5-lightning-free',
-  'mimo-v2.5-free',
-  'deepseek-v4-flash-free'
+  'ling-3.0-flash-fin-free',
+  'mimo-v2.5-free'
 ];
 
 // 挂到 window — 内联 onchange 处理器在全局作用域查找函数

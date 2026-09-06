@@ -1,0 +1,801 @@
+/* ═══════════════ agent/agent-settings.js ═══════════════
+   智能体设置面板 — 点击头像打开
+   功能：修改系统提示词、LLM配置、调整工具、ClawHub skill安装/卸载
+   ═══════════════════════════════════════════════════════ */
+
+// [2026-08-28] OpenCode Zen (opencode.ai) 免费匿名 LLM 共享模块
+const OCProviders = await import('/static/agent/agent-llm-providers.js?v=20260903d');
+
+async function openSettings(agentId) {
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const AgentTools = (await import('/static/agent/agent-tools.js?v=20260904b')).default;
+  const config = await AgentStorage.getConfig(agentId);
+  if (!config) { toast('Agent config not found', 'error'); return; }
+
+  // 加载样式
+  if (!document.getElementById('agent-styles')) {
+    const link = document.createElement('link');
+    link.id = 'agent-styles'; link.rel = 'stylesheet';
+    link.href = '/static/agent/agent-styles.css';
+    document.head.appendChild(link);
+  }
+
+  const allTools = AgentTools.getToolList();
+  const enabledTools = new Set(config.tools || []);
+
+  // 创建 modal
+  let modal = document.getElementById('agentSettingsModal');
+  if (modal) modal.remove();
+  modal = document.createElement('div');
+  modal.id = 'agentSettingsModal';
+  modal.className = 'modal-overlay open';
+  modal.style.display = 'flex';
+  modal.innerHTML = `
+    <div class="modal modal-wide" style="max-width:700px;max-height:90vh;overflow-y:auto">
+      <h3>⚙️ ${config.name} 设置</h3>
+      <div class="auth-tabs" style="margin-bottom:16px">
+        <button class="auth-tab active" onclick="switchSettingsTab('prompt')">提示词</button>
+        <button class="auth-tab" onclick="switchSettingsTab('llm')">LLM配置</button>
+        <button class="auth-tab" onclick="switchSettingsTab('tools')">工具</button>
+        <button class="auth-tab" onclick="switchSettingsTab('clawhub')">ClawHub</button>
+        <button class="auth-tab" onclick="switchSettingsTab('llmlog')">LLM日志</button>
+        <button class="auth-tab" onclick="switchSettingsTab('data')">数据</button>
+      </div>
+
+      <!-- 提示词 -->
+      <div id="settingsPrompt" class="settings-tab">
+        <div class="form-group">
+          <label>${t('ag_system_prompt')}</label>
+          <textarea id="settingsSystemPrompt" rows="8" style="min-height:200px">${config.system_prompt || ''}</textarea>
+        </div>
+        <button class="btn-action" onclick="saveSettings('${agentId}','prompt')">${t('ag_save')}</button>
+      </div>
+
+      <!-- LLM配置 -->
+      <div id="settingsLlm" class="settings-tab" style="display:none">
+        <div class="form-group">
+          <label>${t('ag_provider_label')}</label>
+          <select id="settingsLlmProvider" onchange="updateSettingsLlmUI()">
+            <!-- [2026-08-29] OpenCode Zen 免费供应商排在第一位（与创建页一致） -->
+            <option value="opencode" ${config.llm_config?.provider==='opencode'?'selected':''}>${t('ag_provider_opencode')}</option>
+            <option value="scnet" ${config.llm_config?.provider==='scnet'?'selected':''}>${t('ag_provider_scnet')}</option>
+            <option value="chat-accumulation" ${config.llm_config?.provider==='chat-accumulation'?'selected':''}>${t('ag_provider_accum')}</option>
+            <option value="deepseek" ${config.llm_config?.provider==='deepseek'?'selected':''}>DeepSeek</option>
+            <option value="openai" ${config.llm_config?.provider==='openai'?'selected':''}>OpenAI</option>
+            <option value="custom" ${config.llm_config?.provider==='custom'?'selected':''}>${t('ag_provider_custom')}</option>
+          </select>
+        </div>
+        <div id="settingsLlmFields"></div>
+        <div class="btn-row" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
+          <button class="btn-action" onclick="saveSettings('${agentId}','llm')">${t('ag_save')}</button>
+          <button class="btn-secondary" onclick="testLLMConnection('${agentId}')" id="testLlmBtn">${t('ag_test_btn')}</button>
+        </div>
+        <div id="llmTestResult" style="margin-top:12px;font-size:13px"></div>
+      </div>
+
+      <!-- 工具 -->
+      <div id="settingsTools" class="settings-tab" style="display:none">
+        <div class="tool-actions" style="margin-bottom:8px">
+          <a onclick="document.querySelectorAll('#settingsToolsList input').forEach(c=>c.checked=true)">全选</a> |
+          <a onclick="document.querySelectorAll('#settingsToolsList input').forEach(c=>c.checked=false)">取消全选</a>
+        </div>
+        <div class="agent-tools-list" id="settingsToolsList">
+          ${allTools.map(t => `<label class="tool-checkbox"><input type="checkbox" value="${t.name}" ${enabledTools.has(t.name)?'checked':''}> ${t.name} <span class="tool-desc">${t.description.slice(0,60)}</span></label>`).join('')}
+        </div>
+        <button class="btn-action" onclick="saveSettings('${agentId}','tools')" style="margin-top:12px">${t('ag_save')}</button>
+      </div>
+
+      <!-- ClawHub -->
+      <div id="settingsClawhub" class="settings-tab" style="display:none">
+        <div class="form-group">
+          <label>搜索 ClawHub Skills</label>
+          <div style="display:flex;gap:8px">
+            <input type="text" id="clawhubSearchInput" placeholder="搜索技能..." style="flex:1" onkeypress="if(event.key==='Enter')clawhubSearch()">
+            <button class="btn-action" onclick="clawhubSearch()">搜索</button>
+          </div>
+        </div>
+        <div id="clawhubResults" style="margin-top:12px"></div>
+        <hr style="margin:16px 0">
+        <h4>已安装的 Skills</h4>
+        <div id="installedSkills" style="margin-top:8px"></div>
+      </div>
+
+      <!-- LLM日志 -->
+      <!-- [2026-09-04] 每次调用 LLM 的日志列表（环形最近 100 条），Content 点击看详情 -->
+      <div id="settingsLlmLog" class="settings-tab" style="display:none">
+        <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--text-muted,#888)" id="llmLogSummary"></span>
+          <span style="flex:1"></span>
+          <a onclick="refreshLlmLog()" style="cursor:pointer;font-size:12px">刷新</a>
+          <span style="color:#ddd">|</span>
+          <a onclick="clearLlmLog()" style="cursor:pointer;font-size:12px;color:#c00">清空</a>
+        </div>
+        <div id="llmLogTableWrap" style="overflow-x:auto"></div>
+      </div>
+
+      <!-- 数据 -->
+      <div id="settingsData" class="settings-tab" style="display:none">
+        <button class="btn-action" onclick="exportAgentData('${agentId}')">📥 ${t('ag_export')}</button>
+        <button class="btn-secondary" onclick="document.getElementById('importAgentFile').click()" style="margin-left:8px">📥 ${t('ag_import')}</button>
+        <input type="file" id="importAgentFile" accept=".json" style="display:none" onchange="importAgentData('${agentId}',event)">
+        <hr style="margin:16px 0">
+        <button class="btn-secondary" onclick="deleteAgent('${agentId}')" style="color:red">🗑️ ${t('ag_delete') || 'Delete Agent'}</button>
+      </div>
+
+      <div class="btn-row" style="margin-top:20px">
+        <button class="btn-secondary" onclick="document.getElementById('agentSettingsModal').remove()">${t('ag_close')}</button>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(modal);
+  modal.onclick = (e) => { if (e.target === modal) modal.remove(); };
+
+  // 初始化 LLM 配置字段
+  updateSettingsLlmUI(config.llm_config);
+  // 加载已安装 skills
+  loadInstalledSkills(agentId);
+}
+
+function switchSettingsTab(tab) {
+  document.querySelectorAll('#agentSettingsModal .auth-tab').forEach((t, i) => {
+    const tabs = ['prompt','llm','tools','clawhub','llmlog','data'];
+    t.classList.toggle('active', tabs[i] === tab);
+  });
+  ['Prompt','Llm','Tools','Clawhub','LlmLog','Data'].forEach(name => {
+    const el = document.getElementById('settings' + name);
+    if (el) el.style.display = (name.toLowerCase() === tab) ? 'block' : 'none';
+  });
+  // [2026-09-04] 切到 LLM日志 tab 时渲染列表
+  if (tab === 'llmlog') refreshLlmLog();
+}
+
+function updateSettingsLlmUI(existingConfig) {
+  const provider = document.getElementById('settingsLlmProvider').value;
+  const fields = document.getElementById('settingsLlmFields');
+  const cfg = existingConfig || {};
+
+  if (provider === 'scnet') {
+    fields.innerHTML = `
+      <div class="form-group"><label>${t('ag_scnet_cookie')}</label><textarea id="settingsScnetCookie" rows="3">${cfg.cookie||''}</textarea></div>
+      <div class="form-group"><label>${t('ag_model_id')}</label>
+        <select id="settingsScnetModel">
+          <option value="520" ${cfg.model_id==520?'selected':''}>DeepSeek-V4-Flash</option>
+          <option value="510" ${cfg.model_id==510?'selected':''}>DeepSeek-V4-Pro</option>
+          <option value="17" ${cfg.model_id==17?'selected':''}>Qwen3-30B</option>
+          <option value="120" ${cfg.model_id==120?'selected':''}>Qwen3-235B</option>
+          <option value="410" ${cfg.model_id==410?'selected':''}>MiniMax-M2.5</option>
+        </select>
+      </div>`;
+  } else if (provider === 'opencode') {
+    // [2026-08-28] OpenCode Zen — 匿名免费 LLM，两种 API 类型
+    // [2026-09-03d] 一次性列出全部模型（free 优先），API 类型按所选模型 ID 自动匹配
+    // （旧的手选 API 类型下拉已移除；保存时由 collectOpenCodeConfig 自动推导）
+    const cfg = existingConfig || {};
+    fields.innerHTML = `
+      <div class="form-group">
+        <label>${t('ag_opencode_model')}</label>
+        <select id="settingsOcModel" onchange="updateOpenCodeCustomModelUI('settings')"></select>
+        <div id="settingsOcApiTypeHint" style="font-size:11px;color:#1a7a1a;margin-top:4px;min-height:14px"></div>
+      </div>
+      <div class="form-group" id="settingsOcCustomModelGroup" style="display:none">
+        <label>${t('ag_opencode_custom_model')}</label>
+        <input type="text" id="settingsOcModelCustom" value="" placeholder="e.g. gpt-5.4-nano" oninput="updateOpenCodeCustomModelUI('settings')">
+      </div>
+      <div class="form-group">
+        <label>${t('ag_api_key')} (Optional)</label>
+        <input type="password" id="settingsOcApiKey" value="${cfg.api_key||''}" placeholder="${t('ag_opencode_key_hint')}">
+      </div>
+      <div class="form-group" style="padding:8px;background:#eef9ee;border-radius:6px;border:1px solid #bfe3bf;font-size:11px;color:#1a7a1a">
+        ${t('ag_opencode_free_note')}
+      </div>
+    `;
+    window.updateOpenCodeModelOptions('settings', cfg.model || '');
+  } else if (provider === 'chat-accumulation') {
+    const baseUrl = cfg.base_url || '';
+    fields.innerHTML = `
+      <div class="form-group"><label>${t('ag_base_url')}</label><input type="text" id="settingsBaseUrl" value="${baseUrl}" placeholder="${t('ag_base_url_ph')}"></div>
+      <div class="form-group"><label>${t('ag_api_key')}</label><input type="password" id="settingsApiKey" value="${cfg.api_key||''}"></div>
+      <div class="form-group"><label>${t('ag_model')}</label><input type="text" id="settingsModel" value="${cfg.model||''}" placeholder="${t('ag_model_ph')}"></div>
+      <div class="form-group" style="padding:10px;background:#e8f4fd;border-radius:6px;border:1px solid #b3d9f2;font-size:12px;color:#0066cc">
+        ${t('ag_accum_desc')}
+      </div>`;
+  } else {
+    const baseUrl = cfg.base_url || (provider==='deepseek'?'https://api.deepseek.com/v1':provider==='openai'?'https://api.openai.com/v1':'');
+    fields.innerHTML = `
+      ${provider==='custom' ? `<div class="form-group"><label>${t('ag_base_url')}</label><input type="text" id="settingsBaseUrl" value="${baseUrl}" placeholder="${t('ag_base_url_ph')}"></div>` : ''}
+      <div class="form-group"><label>${t('ag_api_key')}</label><input type="password" id="settingsApiKey" value="${cfg.api_key||''}"></div>
+      <div class="form-group"><label>${t('ag_model')}</label><input type="text" id="settingsModel" value="${cfg.model||''}" placeholder="${t('ag_model_ph')}"></div>
+      <div class="form-group" style="margin-top:12px;padding:10px;background:#faf8f5;border-radius:6px;border:1px solid var(--beige,#e0d0bc)">
+        <label style="display:flex;align-items:center;gap:8px;cursor:pointer">
+          <input type="checkbox" id="settingsCompatMode" ${cfg.compat_mode?'checked':''} style="width:auto">
+          <span>${t('ag_compat_mode')}</span>
+        </label>
+        <div style="font-size:11px;color:var(--text-muted,#999);margin-top:4px;margin-left:24px">
+          ${t('ag_compat_hint')}
+        </div>
+      </div>`;
+  }
+}
+
+async function saveSettings(agentId, tab) {
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const config = await AgentStorage.getConfig(agentId);
+  if (!config) return;
+
+  if (tab === 'prompt') {
+    config.system_prompt = document.getElementById('settingsSystemPrompt').value;
+  } else if (tab === 'llm') {
+    const provider = document.getElementById('settingsLlmProvider').value;
+    config.llm_config = { provider };
+    if (provider === 'opencode') {
+      // [2026-08-28] OpenCode Zen 免费匿名 LLM（API Key 可选）
+      const oc = OCProviders.default.collectOpenCodeConfig('settings');
+      if (oc.error) { toast(t(oc.error), 'error'); return; }
+      Object.assign(config.llm_config, oc);
+    } else if (provider === 'scnet') {
+      config.llm_config.cookie = document.getElementById('settingsScnetCookie').value;
+      config.llm_config.model_id = parseInt(document.getElementById('settingsScnetModel').value);
+    } else if (provider === 'chat-accumulation') {
+      config.llm_config.api_key = document.getElementById('settingsApiKey').value;
+      config.llm_config.model = document.getElementById('settingsModel').value;
+      config.llm_config.base_url = document.getElementById('settingsBaseUrl')?.value || '';
+      // session_id 自动管理，不从表单读取
+    } else {
+      config.llm_config.api_key = document.getElementById('settingsApiKey').value;
+      config.llm_config.model = document.getElementById('settingsModel').value;
+      config.llm_config.base_url = provider==='deepseek' ? 'https://api.deepseek.com/v1' :
+        provider==='openai' ? 'https://api.openai.com/v1' :
+        document.getElementById('settingsBaseUrl')?.value || '';
+      // 兼容模式开关
+      const compatCheckbox = document.getElementById('settingsCompatMode');
+      config.llm_config.compat_mode = compatCheckbox ? compatCheckbox.checked : false;
+    }
+  } else if (tab === 'tools') {
+    config.tools = Array.from(document.querySelectorAll('#settingsToolsList input:checked')).map(c => c.value);
+  }
+
+  await AgentStorage.saveConfig(agentId, config);
+  await AgentStorage.saveToKV('local_agent_' + agentId, config);
+  toast(t('ag_settings_saved'), 'success');
+}
+
+// ─── 测试 LLM 连通性 ───
+// 读取当前 LLM 配置 tab 里的表单值（不需要先保存），发送一个最小测试请求
+async function testLLMConnection(agentId) {
+  const resultEl = document.getElementById('llmTestResult');
+  const btn = document.getElementById('testLlmBtn');
+  if (!resultEl || !btn) return;
+
+  // 收集当前 tab 的配置（不依赖 saveSettings）
+  const provider = document.getElementById('settingsLlmProvider').value;
+  let llmConfig = { provider };
+  if (provider === 'opencode') {
+    // [2026-08-28] OpenCode Zen — API 类型 + 模型 + 可选 Key
+    const oc = OCProviders.default.collectOpenCodeConfig('settings');
+    if (oc.error) { resultEl.innerHTML = '<span style="color:#c00">❌ ' + t(oc.error) + '</span>'; return; }
+    Object.assign(llmConfig, oc);
+  } else if (provider === 'scnet') {
+    llmConfig.cookie = document.getElementById('settingsScnetCookie')?.value.trim() || '';
+    llmConfig.model_id = parseInt(document.getElementById('settingsScnetModel')?.value || '520');
+    if (!llmConfig.cookie) {
+      resultEl.innerHTML = '<span style="color:#c00">' + t('ag_fill_cookie') + '</span>';
+      return;
+    }
+  } else if (provider === 'chat-accumulation') {
+    llmConfig.api_key = document.getElementById('settingsApiKey')?.value.trim() || '';
+    llmConfig.model = document.getElementById('settingsModel')?.value.trim() || '';
+    llmConfig.base_url = document.getElementById('settingsBaseUrl')?.value.trim() || '';
+    if (!llmConfig.api_key) { resultEl.innerHTML = '<span style="color:#c00">' + t('ag_fill_apikey') + '</span>'; return; }
+    if (!llmConfig.model) { resultEl.innerHTML = '<span style="color:#c00">' + t('ag_fill_model') + '</span>'; return; }
+    if (!llmConfig.base_url) { resultEl.innerHTML = '<span style="color:#c00">' + t('ag_fill_baseurl') + '</span>'; return; }
+  } else {
+    llmConfig.api_key = document.getElementById('settingsApiKey')?.value.trim() || '';
+    llmConfig.model = document.getElementById('settingsModel')?.value.trim() || '';
+    if (provider === 'deepseek') llmConfig.base_url = 'https://api.deepseek.com/v1';
+    else if (provider === 'openai') llmConfig.base_url = 'https://api.openai.com/v1';
+    else llmConfig.base_url = document.getElementById('settingsBaseUrl')?.value.trim() || '';
+    // 读取兼容模式开关
+    const compatCheckbox = document.getElementById('settingsCompatMode');
+    llmConfig.compat_mode = compatCheckbox ? compatCheckbox.checked : false;
+    if (!llmConfig.api_key) {
+      resultEl.innerHTML = '<span style="color:#c00">' + t('ag_fill_apikey') + '</span>';
+      return;
+    }
+    if (!llmConfig.model) {
+      resultEl.innerHTML = '<span style="color:#c00">' + t('ag_fill_model_name') + '</span>';
+      return;
+    }
+    if (!llmConfig.base_url) {
+      resultEl.innerHTML = '<span style="color:#c00">' + t('ag_fill_baseurl') + '</span>';
+      return;
+    }
+  }
+
+  btn.disabled = true;
+  btn.textContent = t('ag_testing_btn');
+  resultEl.innerHTML = '<span style="color:var(--text-muted,#999)">⏳ ' + t('ag_testing') + '</span>';
+
+  const startTime = Date.now();
+  try {
+    // [2026-08-28] OpenCode Zen — 独立测试路径（支持两种 API 类型 + 匿名无 Key）
+    if (provider === 'opencode') {
+      const r = await OCProviders.default.testOpenCodeConnection(llmConfig);
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      if (r.ok) {
+        resultEl.innerHTML = `<span style="color:green">✅ ${t('ag_test_ok')}</span><br><span style="font-size:12px">${t('ag_model_label')}: <code>${r.model || llmConfig.model}</code> (${llmConfig.api_type})</span><br><span style="font-size:12px">${t('ag_response_preview')}: ${r.preview}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+      } else {
+        resultEl.innerHTML = `<span style="color:#c00">❌ ${r.error}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+      }
+      return;
+    }
+
+    // 构建测试请求 — 发送一个最小的 ping 消息
+    const proxyBody = provider === 'scnet' ? {
+      target_url: 'https://www.scnet.cn/acx/chatbot/v1/chat/completion',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Cookie': llmConfig.cookie,
+        'Accept': 'text/event-stream',
+        'Origin': 'https://www.scnet.cn',
+        'Referer': 'https://www.scnet.cn/ui/chatbot/test',
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0'
+      },
+      body: JSON.stringify({
+        // scnet API 要求 conversationId 是数字 long，不能是字符串
+        conversationId: Date.now(),
+        content: 'ping',
+        thinkingEnable: false, onlineEnable: false,
+        modelId: llmConfig.model_id || 520,
+        textFile: [], imageFile: [], autoRun: 0, clusterId: ''
+      }),
+      stream: true
+    } : provider === 'chat-accumulation' ? {
+      // chat-accumulation 测试: 用标准 OpenAI 格式发 ping
+      // session_id 在测试时不用（测试只验证连通性）
+      target_url: llmConfig.base_url + '/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${llmConfig.api_key}`
+      },
+      body: JSON.stringify({
+        model: llmConfig.model,
+        messages: [{ role: 'user', content: 'ping' }],
+        stream: false,
+        max_tokens: 10
+      }),
+      stream: false
+    } : {
+      target_url: llmConfig.base_url + '/chat/completions',
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${llmConfig.api_key}`
+      },
+      body: JSON.stringify({
+        model: llmConfig.model,
+        messages: [{ role: 'user', content: 'ping' }],
+        // 兼容模式不发 tools — 模拟实际聊天请求
+        // 不兼容模式也不发 tools（测试只验证连通性，不带工具可以避免 503）
+        stream: false,
+        max_tokens: 10
+      }),
+      stream: false
+    };
+
+    const resp = await fetch('/api/v1/agent/llm-proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + S.accessToken },
+      body: JSON.stringify(proxyBody)
+    });
+
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+
+    if (!resp.ok) {
+      // 读取错误详情
+      let errDetail = '';
+      try {
+        const errText = await resp.text();
+        try {
+          const errJson = JSON.parse(errText);
+          const raw = errJson.error || errJson.message || errText;
+          errDetail = typeof raw === 'string' ? raw : JSON.stringify(raw);
+        } catch { errDetail = errText; }
+      } catch {}
+      let hint = '';
+      if (resp.status === 502) hint = ' — 代理无法连接到 LLM API（DNS/网络/TLS 问题）';
+      else if (resp.status === 401 || resp.status === 403) hint = ' — 认证失败，API Key 或 Cookie 不正确';
+      else if (resp.status === 404) hint = ' — URL 不存在，检查 base_url';
+      resultEl.innerHTML = `<span style="color:#c00">❌ HTTP ${resp.status}${hint}</span><br><span style="font-size:12px;color:var(--text-muted,#999)">详情: ${String(errDetail).slice(0,300)}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+      return;
+    }
+
+    // 测试通过后，如果非兼容模式且非 scnet/chat-accumulation，提示 tools 风险
+    const compatNote = (!llmConfig.compat_mode && provider !== 'scnet' && provider !== 'chat-accumulation')
+      ? `<div style="margin-top:8px;font-size:11px;color:var(--text-muted,#999);padding:6px 8px;background:#fff3cd;border-radius:4px">${t('ag_compat_note')}</div>`
+      : '';
+
+    // 解析响应内容
+    if (provider === 'scnet') {
+      // scnet 返回 SSE 流，检查是否能拿到任何 contentType=1001 的内容
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = '';
+      let gotContent = false;
+      let errMsg = '';
+      const deadline = Date.now() + 30000;  // 30s timeout
+      while (Date.now() < deadline) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+        while (buf.includes('\n\n')) {
+          const idx = buf.indexOf('\n\n');
+          const event = buf.slice(0, idx);
+          buf = buf.slice(idx + 2);
+          for (const line of event.split('\n')) {
+            if (!line.startsWith('data:')) continue;
+            try {
+              const obj = JSON.parse(line.slice(5).trim());
+              if (obj.contentType === '1001' && obj.content) { gotContent = true; }
+              else if (obj.contentType && obj.contentType !== '1002' && obj.content) { errMsg = obj.content; }
+            } catch {}
+          }
+        }
+        if (gotContent || errMsg) break;
+      }
+      if (errMsg) {
+        resultEl.innerHTML = `<span style="color:#c00">❌ ${t('ag_test_scnet_err')}${errMsg}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+      } else if (gotContent) {
+        resultEl.innerHTML = `<span style="color:green">✅ ${t('ag_test_scnet_ok')}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+      } else {
+        resultEl.innerHTML = `<span style="color:#c00">❌ ${t('ag_test_scnet_empty')}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+      }
+    } else {
+      // OpenAI 兼容
+      const text = await resp.text();
+      let modelInfo = '';
+      let contentPreview = '';
+      try {
+        const data = JSON.parse(text);
+        modelInfo = data.model || llmConfig.model;
+        contentPreview = data.choices?.[0]?.message?.content?.slice(0, 50) || '(空响应)';
+        if (data.error) {
+          resultEl.innerHTML = `<span style="color:#c00">❌ ${t('ag_test_llm_err')}${data.error.message || data.error}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+          return;
+        }
+      } catch {
+        contentPreview = text.slice(0, 50);
+      }
+      resultEl.innerHTML = `<span style="color:green">✅ ${t('ag_test_ok')}</span><br><span style="font-size:12px">${t('ag_model_label')}: <code>${modelInfo}</code></span><br><span style="font-size:12px">${t('ag_response_preview')}: ${contentPreview}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>${compatNote}`;
+    }
+  } catch(e) {
+    const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+    resultEl.innerHTML = `<span style="color:#c00">❌ ${t('ag_test_exception')}${e.message}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = t('ag_test_btn');
+  }
+}
+
+// ─── ClawHub ───
+async function clawhubSearch() {
+  const query = document.getElementById('clawhubSearchInput').value.trim();
+  if (!query) return;
+  const results = document.getElementById('clawhubResults');
+  results.innerHTML = '<p>搜索中...</p>';
+
+  try {
+    const resp = await fetch('https://clawhub.ai/api/v1/search?q=' + encodeURIComponent(query) + '&limit=20');
+    const data = await resp.json();
+    const skills = Array.isArray(data) ? data : (data.results || []);
+    if (!skills.length) { results.innerHTML = '<p>未找到相关技能</p>'; return; }
+
+    results.innerHTML = skills.map(s => `
+      <div class="clawhub-skill-item">
+        <div><strong>${s.name || s.slug}</strong></div>
+        <div style="font-size:12px;color:var(--text-muted)">${s.description || ''}</div>
+        <button class="btn-action" style="margin-top:4px;padding:2px 8px;font-size:12px" onclick="installClawhubSkill('${s.slug || s.name}')">安装</button>
+      </div>
+    `).join('');
+  } catch(e) {
+    results.innerHTML = '<p style="color:red">搜索失败: ' + e.message + '</p>';
+  }
+}
+
+async function installClawhubSkill(slug) {
+  const agentId = document.getElementById('agentSettingsModal').querySelector('.btn-action').getAttribute('onclick')?.match(/'([^']+)'/)?.[1] || '';
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+
+  try {
+    // 获取 skill 详情
+    const resp = await fetch('https://clawhub.ai/api/v1/skills/' + slug);
+    const skillInfo = await resp.json();
+
+    await AgentStorage.saveSkill(agentId, {
+      slug, name: skillInfo.name || slug,
+      description: skillInfo.description || '',
+      prompt: skillInfo.prompt || skillInfo.system_prompt || '',
+      tools: skillInfo.tools || [],
+      version: skillInfo.version || '',
+      source: 'clawhub'
+    });
+
+    toast('Skill ' + slug + ' 安装成功', 'success');
+    loadInstalledSkills(agentId);
+  } catch(e) {
+    toast('安装失败: ' + e.message, 'error');
+  }
+}
+
+async function loadInstalledSkills(agentId) {
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const skills = await AgentStorage.getSkills(agentId);
+  const el = document.getElementById('installedSkills');
+  if (!el) return;
+  if (!skills.length) { el.innerHTML = '<p style="color:var(--text-muted)">暂无已安装的 Skills</p>'; return; }
+  el.innerHTML = skills.map(s => `
+    <div class="clawhub-skill-item">
+      <div><strong>${s.name}</strong> <span style="font-size:11px;color:var(--text-muted)">v${s.version||'1.0'}</span></div>
+      <div style="font-size:12px;color:var(--text-muted)">${s.description?.slice(0,80)||''}</div>
+      <button class="btn-secondary" style="margin-top:4px;padding:2px 8px;font-size:12px;color:red" onclick="uninstallClawhubSkill('${agentId}','${s.slug}')">卸载</button>
+    </div>
+  `).join('');
+}
+
+async function uninstallClawhubSkill(agentId, slug) {
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  await AgentStorage.removeSkill(agentId, slug);
+  toast('Skill 已卸载', 'success');
+  loadInstalledSkills(agentId);
+}
+
+// ─── 数据导出/导入/删除 ───
+async function exportAgentData(agentId) {
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const data = await AgentStorage.exportAgent(agentId);
+  if (!data) { toast('无数据', 'error'); return; }
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = `agent_${agentId}_export.json`;
+  a.click();
+  toast(t('ag_exported'), 'success');
+}
+
+async function importAgentData(agentId, event) {
+  const file = event.target.files[0];
+  if (!file) return;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const text = await file.text();
+  const data = JSON.parse(text);
+  await AgentStorage.importAgent(data);
+  toast(t('ag_imported'), 'success');
+}
+
+async function deleteAgent(agentId) {
+  if (!confirm(t('ag_delete_confirm') || 'Are you sure? All data will be deleted, including friend relationship and owner binding on the server.')) return;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const config = await AgentStorage.getConfig(agentId);
+  // Close WS
+  if (window.AgentEngine?._agentWS?.[agentId]) {
+    try { window.AgentEngine._agentWS[agentId].close(); } catch(e) {}
+    delete window.AgentEngine._agentWS[agentId];
+  }
+  // Delete local data
+  await AgentStorage.deleteAgent(agentId);
+
+  // Remove friend relationship on server (bidirectional)
+  try {
+    await fetch('/api/v1/friends/' + agentId, {
+      method: 'DELETE',
+      headers: { 'Authorization': 'Bearer ' + S.accessToken }
+    });
+  } catch(e) { console.warn('[deleteAgent] Failed to remove friend:', e); }
+
+  // Clear owner_id binding on the agent's server account
+  // This unbinds the agent from the owner so it can be re-bound later
+  if (config?.access_token) {
+    try {
+      await fetch('/api/v1/accounts/me', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': 'Bearer ' + config.access_token
+        },
+        body: JSON.stringify({ owner_id: '' })
+      });
+    } catch(e) { console.warn('[deleteAgent] Failed to clear owner_id:', e); }
+  }
+
+  // Also try to remove the agent from the server's friend list via the agent's token
+  // (agent removes the owner as friend, completing the bidirectional removal)
+  if (config?.access_token && S.account?.id) {
+    try {
+      await fetch('/api/v1/friends/' + S.account.id, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer ' + config.access_token }
+      });
+    } catch(e) { console.warn('[deleteAgent] Failed to remove owner from agent friends:', e); }
+  }
+
+  // Clear friends cache and force refresh (bypasses race condition guard)
+  if (S.account?.id) await LocalDB.setKV('aicq_friends_' + S.account.id, null);
+  S._forceFriendsRefresh = true; // Bypass race condition guard in loadFriends
+  document.getElementById('agentSettingsModal')?.remove();
+  if (typeof loadFriends === 'function') await loadFriends();
+  // [2026-08-29] 删除完成 → 刷新创建 tab 可见性（本账号已无智能体 → 按钮恢复显示）
+  try { if (window.AICQAgent && window.AICQAgent.refreshCreateTab) window.AICQAgent.refreshCreateTab(); } catch(e) {}
+  toast(t('ag_deleted') || 'Agent deleted', 'success');
+}
+
+// ═══════ [2026-09-04] LLM 调用日志（设置页 tab 渲染）═══════
+// 数据来自 agent-llm-log.js（环形最近 100 条 + localStorage 持久化），
+// engine 每次真实调用 LLM 后写入；本页滚动更新（监听 llm-log-updated 事件）。
+let _llmLogRows = [];  // 当前列表快照（详情按 id 查找）
+
+function _llmEsc(s) {
+  return String(s == null ? '' : s).replace(/[&<>"']/g, c =>
+    ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+function _llmFmtTime(ts) {
+  const d = new Date(ts), now = new Date();
+  const pad = n => String(n).padStart(2, '0');
+  const hm = pad(d.getHours()) + ':' + pad(d.getMinutes()) + ':' + pad(d.getSeconds());
+  if (d.toDateString() === now.toDateString()) return hm;
+  return (d.getMonth() + 1) + '-' + pad(d.getDate()) + ' ' + hm;
+}
+
+function _llmFmtLatency(ms) {
+  if (!ms && ms !== 0) return '-';
+  return ms >= 1000 ? (ms / 1000).toFixed(1) + 's' : ms + 'ms';
+}
+
+function _llmFmtTokens(e) {
+  const fi = (n) => (n === null || n === undefined) ? '-' : (n >= 1000 ? (n / 1000).toFixed(1) + 'k' : String(n));
+  const est = e.tokens_est ? '~' : '';
+  return `${est}${fi(e.tokens_in)} / ${est}${fi(e.tokens_out)}`;
+}
+
+// Status 徽标：2xx 绿 / 4xx-5xx 红 / ERR 红 / 有 error 文本黄
+function _llmStatusBadge(e) {
+  const hasErr = !!e.error;
+  const s = String(e.status);
+  let bg = '#e8f6e8', color = '#1a7a1a';
+  if (s === 'ERR' || /^[45]/.test(s) || (hasErr && s.startsWith('2'))) { bg = '#fdeaea'; color = '#c00'; }
+  return `<span style="display:inline-block;padding:1px 8px;border-radius:10px;font-size:11px;font-weight:600;background:${bg};color:${color};white-space:nowrap">${s === 'ERR' ? 'ERR' : _llmEsc(s)}${e.phase === 'SSE' ? ' ·SSE' : ''}</span>`;
+}
+
+// Content 摘要：输出前 40 字 / 工具调用名 / 错误信息
+function _llmContentSummary(e) {
+  if (e.error) return '❌ ' + e.error.slice(0, 60);
+  let out = (e.output || '').trim();
+  const tcLine = out.split('\n').find(l => l.startsWith('[tool_calls]'));
+  if (tcLine) return '🔧 ' + tcLine.replace('[tool_calls] ', '').slice(0, 50);
+  if (!out) return '(空响应)';
+  return out.slice(0, 40).replace(/\n/g, ' ') + (out.length > 40 ? '…' : '');
+}
+
+async function refreshLlmLog() {
+  const wrap = document.getElementById('llmLogTableWrap');
+  const summary = document.getElementById('llmLogSummary');
+  if (!wrap) return;
+  try {
+    const LLMLog = (await import('/static/agent/agent-llm-log.js?v=20260904b')).default;
+    _llmLogRows = LLMLog.list();
+  } catch (e) {
+    wrap.innerHTML = '<p style="color:red;font-size:12px">日志模块加载失败: ' + _llmEsc(e.message) + '</p>';
+    return;
+  }
+  const rows = _llmLogRows;
+  if (summary) {
+    summary.textContent = rows.length
+      ? `最近 ${rows.length} 条（上限 100，自动淘汰最旧）`
+      : '暂无日志 — 与智能体对话后这里会自动记录每次 LLM 调用';
+  }
+  if (!rows.length) {
+    wrap.innerHTML = '<div style="padding:24px;text-align:center;color:var(--text-muted,#999);font-size:13px">' +
+      '📭 暂无 LLM 调用日志<br><span style="font-size:11px">给智能体发一条消息后，这里会实时记录模型 / 耗时 / Token / 输入输出</span></div>';
+    return;
+  }
+  const trs = rows.map(e => {
+    const st = _llmStatusBadge(e);
+    const content = _llmContentSummary(e);
+    return `<tr style="border-bottom:1px solid #f0ebe3;cursor:pointer" onclick="showLlmLogDetail('${e.id}')" title="点击查看完整输入输出">
+      <td style="padding:6px 8px;white-space:nowrap;font-size:12px;color:var(--text-muted,#666)">${_llmFmtTime(e.ts)}</td>
+      <td style="padding:6px 8px;font-size:12px;max-width:150px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap" title="${_llmEsc(e.model)}">${_llmEsc(e.model || '-')}</td>
+      <td style="padding:6px 8px">${st}</td>
+      <td style="padding:6px 8px;font-size:12px;white-space:nowrap">${_llmFmtLatency(e.latency_ms)}</td>
+      <td style="padding:6px 8px;font-size:12px;white-space:nowrap;color:#555">${_llmFmtTokens(e)}</td>
+      <td style="padding:6px 8px;font-size:12px;max-width:220px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:${e.error ? '#c00' : '#333'}">${_llmEsc(content)}</td>
+    </tr>`;
+  }).join('');
+  wrap.innerHTML = `
+    <table style="width:100%;border-collapse:collapse;min-width:560px">
+      <thead>
+        <tr style="border-bottom:2px solid #e5ddcf;background:#faf8f5">
+          <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">时间</th>
+          <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">模型</th>
+          <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">Status</th>
+          <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">Latency</th>
+          <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">Tokens (in/out)</th>
+          <th style="padding:7px 8px;text-align:left;font-size:11px;color:#998;font-weight:600">Content</th>
+        </tr>
+      </thead>
+      <tbody>${trs}</tbody>
+    </table>`;
+}
+
+async function clearLlmLog() {
+  if (!confirm('清空全部 LLM 调用日志？')) return;
+  const LLMLog = (await import('/static/agent/agent-llm-log.js?v=20260904b')).default;
+  LLMLog.clear();
+  refreshLlmLog();
+}
+
+// 详情弹层：完整输入（按 role 分段）+ 输出
+function showLlmLogDetail(id) {
+  const e = _llmLogRows.find(x => x.id === id);
+  if (!e) return;
+  let old = document.getElementById('llmLogDetailOverlay');
+  if (old) old.remove();
+  const ov = document.createElement('div');
+  ov.id = 'llmLogDetailOverlay';
+  ov.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:10001;display:flex;align-items:center;justify-content:center;padding:20px';
+  const inputTxt = e.input || '(无输入记录)';
+  const outputTxt = e.output || '(空)';
+  ov.innerHTML = `
+    <div style="background:#fff;border-radius:12px;max-width:820px;width:100%;max-height:86vh;display:flex;flex-direction:column;overflow:hidden;box-shadow:0 8px 40px rgba(0,0,0,.25)">
+      <div style="padding:14px 18px;border-bottom:1px solid #eee;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+        <strong style="font-size:14px">LLM 调用详情</strong>
+        ${_llmStatusBadge(e)}
+        <span style="font-size:12px;color:#666">${_llmEsc(e.model)}</span>
+        <span style="font-size:12px;color:#999">${_llmFmtTime(e.ts)} · ${_llmFmtLatency(e.latency_ms)} · ${_llmFmtTokens(e)}${e.phase ? ' · ' + _llmEsc(e.phase) : ''}</span>
+        <span style="flex:1"></span>
+        <button class="btn-secondary" onclick="document.getElementById('llmLogDetailOverlay').remove()">关闭</button>
+      </div>
+      ${e.error ? `<div style="margin:10px 18px 0;padding:10px 12px;background:#fdeaea;border:1px solid #f3c1c1;border-radius:8px;color:#c00;font-size:12px;white-space:pre-wrap;word-break:break-word;max-height:120px;overflow-y:auto">❌ ${_llmEsc(e.error)}</div>` : ''}
+      <div style="padding:12px 18px;overflow-y:auto;flex:1">
+        <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px">输入 (${e.msg_count !== null && e.msg_count !== undefined ? e.msg_count + ' 条消息' : '—'})</div>
+        <pre style="margin:0 0 16px;padding:12px;background:#f8f6f2;border:1px solid #eee5d8;border-radius:8px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:320px;overflow-y:auto;font-family:ui-monospace,Menlo,Consolas,monospace">${_llmEsc(inputTxt)}</pre>
+        <div style="font-size:12px;font-weight:700;color:#555;margin-bottom:6px">输出</div>
+        <pre style="margin:0;padding:12px;background:#f4f9f4;border:1px solid #dcecdc;border-radius:8px;font-size:11.5px;line-height:1.55;white-space:pre-wrap;word-break:break-word;max-height:280px;overflow-y:auto;font-family:ui-monospace,Menlo,Consolas,monospace">${_llmEsc(outputTxt)}</pre>
+      </div>
+    </div>`;
+  ov.onclick = (ev) => { if (ev.target === ov) ov.remove(); };
+  document.body.appendChild(ov);
+}
+
+// [2026-09-04] 滚动更新：engine 记录新日志时自动刷新列表（单例监听，不随 modal 关闭移除）
+function _ensureLlmLogAutoRefresh() {
+  if (window._llmLogAutoRefreshInstalled) return;
+  window._llmLogAutoRefreshInstalled = true;
+  window.addEventListener('llm-log-updated', () => {
+    const tab = document.getElementById('settingsLlmLog');
+    if (tab && tab.style.display !== 'none' && document.getElementById('agentSettingsModal')) {
+      refreshLlmLog();
+    }
+  });
+}
+_ensureLlmLogAutoRefresh();
+
+// 暴露
+window.openSettings = openSettings;
+window.switchSettingsTab = switchSettingsTab;
+window.updateSettingsLlmUI = updateSettingsLlmUI;
+window.saveSettings = saveSettings;
+window.testLLMConnection = testLLMConnection;
+window.clawhubSearch = clawhubSearch;
+window.installClawhubSkill = installClawhubSkill;
+window.loadInstalledSkills = loadInstalledSkills;
+window.uninstallClawhubSkill = uninstallClawhubSkill;
+window.exportAgentData = exportAgentData;
+window.importAgentData = importAgentData;
+window.deleteAgent = deleteAgent;
+// [2026-09-04] LLM 日志 tab
+window.refreshLlmLog = refreshLlmLog;
+window.clearLlmLog = clearLlmLog;
+window.showLlmLogDetail = showLlmLogDetail;
+
+export { openSettings };

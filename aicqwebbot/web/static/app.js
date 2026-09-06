@@ -41,6 +41,78 @@
   catch (e) { applyTheme('light'); }
   $('btnTheme').addEventListener('click', () => applyTheme(THEME === 'dark' ? 'light' : 'dark'));
 
+  // ═══════════ 0b. Host shims for the aicq.me bundle modules ═══════════
+  // agent-settings.js / agent-files.js were written for aicq.me's page which
+  // provides toast(), the i18n t() and the session object S. The bundle files
+  // themselves are zero-modification copies — the host supplies the shims.
+
+  // ── toast (bottom-center, auto-dismiss) ──
+  function toast(msg, type) {
+    let box = document.getElementById('webbotToast');
+    if (!box) { box = document.createElement('div'); box.id = 'webbotToast'; document.body.appendChild(box); }
+    box.textContent = String(msg == null ? '' : msg);
+    box.className = 'webbot-toast show' + (type ? ' ' + type : '');
+    clearTimeout(toast._t);
+    toast._t = setTimeout(() => box.classList.remove('show'), 2600);
+  }
+  window.toast = toast;
+
+  // ── S: minimal session object (the local relay never checks auth) ──
+  window.S = window.S || { accessToken: 'local', account: null };
+
+  // ── t(): English i18n dictionary for the settings modal (ag_* keys) ──
+  const AG_I18N = {
+    ag_system_prompt: 'System Prompt',
+    ag_save: 'Save',
+    ag_provider_label: 'Provider',
+    ag_provider_opencode: 'OpenCode Zen (Free / Anonymous)',
+    ag_provider_scnet: 'scnet.cn (Browser Cookie)',
+    ag_provider_accum: 'Chat-Accumulation (API Key)',
+    ag_provider_custom: 'Custom (OpenAI-compatible)',
+    ag_scnet_cookie: 'Cookie (copy from www.scnet.cn browser)',
+    ag_model_id: 'Model ID',
+    ag_base_url: 'Base URL',
+    ag_base_url_ph: 'https://api.example.com/v1',
+    ag_api_key: 'API Key',
+    ag_model: 'Model',
+    ag_model_ph: 'model-name',
+    ag_opencode_model: 'Model (free models work anonymously)',
+    ag_opencode_custom_model: 'Custom model ID',
+    ag_opencode_key_hint: 'API Key optional — leave blank for anonymous free access (rate-limited). Fill a Zen key for paid models / higher limits.',
+    ag_opencode_free_note: 'Free anonymous models (live-verified 2026-09): nemotron-3-ultra / nemotron-3.5-lightning / ling-3.0-flash-fin (chat/completions), muse-spark-1.3 (responses, region-locked in some regions). Streaming + tool calling work out of the box; free models are text-only. The catalog auto-syncs from GET /models and dead upstream models are filtered; if one still errors, the engine auto-fails-over to another free model.',
+    ag_compat_mode: 'Compat Mode (no function calling)',
+    ag_compat_hint: 'For API proxies without OpenAI function calling support. Symptom: test passes but chat gets 503/400 → check this.',
+    ag_accum_desc: '<strong>Chat-Accumulation Mode:</strong><br>• Session ID auto-managed, no manual input needed<br>• Three-phase send: ①system prompt → ②tools list → ③user message, avoids token limits<br>• Tool calls use <code>&lt;tool_call&gt;</code> text format (no tools parameter)<br>• For OpenAI-compatible APIs with session accumulation (e.g. one-api/new-api forwarding to scnet)',
+    ag_test_btn: 'Test Connection',
+    ag_testing_btn: 'Testing...',
+    ag_testing: 'Testing...',
+    ag_test_ok: 'Connection OK',
+    ag_test_scnet_ok: 'Connection OK — scnet responded successfully',
+    ag_test_scnet_err: 'scnet error: ',
+    ag_test_scnet_empty: 'scnet returned no content (Cookie may have expired)',
+    ag_test_llm_err: 'LLM error: ',
+    ag_test_exception: 'Exception: ',
+    ag_elapsed: 'Elapsed',
+    ag_model_label: 'Model',
+    ag_response_preview: 'Response preview',
+    ag_compat_note: 'Actual chat sends tools parameter. If chat gets 503/400, check "Compat Mode"',
+    ag_fill_cookie: 'Please fill Cookie first',
+    ag_fill_apikey: 'Please fill API Key first',
+    ag_fill_model: 'Please fill Model first',
+    ag_fill_model_name: 'Please fill Model name first',
+    ag_fill_baseurl: 'Please fill Base URL first',
+    ag_settings_saved: 'Settings saved',
+    ag_export: 'Export Agent Data',
+    ag_import: 'Import',
+    ag_exported: 'Exported',
+    ag_imported: 'Imported successfully',
+    ag_delete: 'Delete Agent',
+    ag_delete_confirm: 'Delete this agent? ALL local data (config, virtual FS, history, memory) will be permanently deleted.',
+    ag_deleted: 'Agent deleted',
+    ag_close: 'Close'
+  };
+  window.t = (k) => AG_I18N[k] || k;
+
   // ═══════════ 1. LocalBus — the engine's "WebSocket" ═══════════
 
   class LocalBus {
@@ -236,13 +308,12 @@
   // ── OpenCode free-model catalog — powered by the bundle's provider module ──
   // (agent-llm-providers.js: dynamic /models catalog + static fallback +
   //  /responses vs /chat/completions auto-routing by model prefix)
-  const OC_FALLBACK_MODELS = [
+  const OC_FALLBACK_MODELS = [   // keep in sync with agent-llm-providers.js OPENCODE_MODELS
     { id: 'nemotron-3-ultra-free',       label: 'Nemotron 3 Ultra (Free)' },
     { id: 'nemotron-3.5-lightning-free', label: 'Nemotron 3.5 Lightning (Free)' },
-    { id: 'laguna-s-2.1-free',           label: 'Laguna S 2.1 (Free)' },
-    { id: 'mimo-v2.5-free',              label: 'MiMo-V2.5 (Free)' },
-    { id: 'deepseek-v4-flash-free',      label: 'DeepSeek V4 Flash (Free)' },
-    { id: 'muse-spark-1.3-contributor-free', label: 'Muse Spark 1.3 Contributor (Free)' },
+    { id: 'ling-3.0-flash-fin-free',     label: 'Ling 3.0 Flash Fin (Free)' },
+    { id: 'mimo-v2.5-free',              label: 'MiMo-V2.5 (Free, rate-limited sometimes)' },
+    { id: 'muse-spark-1.3-contributor-free', label: 'Muse Spark 1.3 Contributor (Free, region-locked in some regions)' },
   ];
   const OC_DEFAULT_BASE = 'https://opencode.ai/zen/v1';
   const ocApiTypeFor = (m) => /^(gpt-|grok-|muse-spark-)/.test(m || '') ? 'response' : 'openai-completion';
@@ -458,11 +529,35 @@
     $('csLabel').textContent = 'session ' + UI.cs.slice(3, 11);
     UI.reset();
   });
-  $('btnSettings').addEventListener('click', async () => {
-    const AgentStorage = (await import(_agUrl('agent-storage.js'))).default;
-    const id = localStorage.getItem(AGENT_ID_KEY);
-    const cfg = id ? await AgentStorage.getConfig(id) : null;
-    await showSetup(cfg);
+  // ═══════════ 6b. Settings & file-manager entries ═══════════
+  // ⚙ opens the ORIGINAL aicq.me settings modal (zero-modification copy):
+  //   prompt / LLM config / tools / ClawHub / LLM log / data (import·export·delete)
+  // 📁 opens the original file-manager modal over the agent's virtual FS.
+  let _settingsMod = null;
+
+  async function openFullSettings() {
+    if (!currentAgentId) return;
+    if (!_settingsMod) {
+      _settingsMod = await import(_agUrl('agent-settings.js'));
+      // wrap deleteAgent: standalone shell must also drop its agent-id key
+      // and bounce back to the setup panel after the bundle's own cleanup
+      const origDelete = window.deleteAgent;
+      if (typeof origDelete === 'function') {
+        window.deleteAgent = async function (agentId) {
+          await origDelete(agentId);
+          try { localStorage.removeItem(AGENT_ID_KEY); } catch (e) {}
+          setTimeout(() => location.reload(), 700);
+        };
+      }
+    }
+    window.openSettings(currentAgentId);
+  }
+
+  $('btnSettings').addEventListener('click', openFullSettings);
+  $('btnFiles').addEventListener('click', async () => {
+    if (!currentAgentId) return;
+    await import(_agUrl('agent-files.js'));
+    window.openFileManager(currentAgentId);
   });
 
   (async function boot() {

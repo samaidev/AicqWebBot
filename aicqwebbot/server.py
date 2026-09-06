@@ -249,4 +249,4 @@ async def index():
 
 @app.get("/healthz")
 async def healthz():
-    return {"ok": True, "version": "0.2.0"}
+    return {"ok": True, "version": "0.3.0"}

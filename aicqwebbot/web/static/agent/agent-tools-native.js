@@ -1472,33 +1472,72 @@ const AgentToolsNative = {
   // 20000 字符截断后 JSON.parse 必炸（"Unterminated string at position 20000"）。
   // 改用紧凑文本格式（单行、无 JSON），另保留 j1 兜底 + 容错解析。
   async weather(args, ctx) {
-    const loc = encodeURIComponent(args.location);
-    const proxy = (url) => this._proxyBody(url, ctx, { 'User-Agent': 'curl/8.0' });
-    // 1) 紧凑单行格式："Smoky haze, +25°C, humidity 62%, wind ↖8km/h"
+    const loc = String(args.location || '').trim();
+    // [FIX 2026-09-06] 三级策略（wttr.in 无 CORS 头、open-meteo 有每 IP 日限额，
+    // 单一源都会翻车）：
+    //   ① 本地/容器形态：wttr.in 经 web-proxy（curl UA 才能拿紧凑文本）
+    //   ② 静态形态：nominatim(OSM) 地理编码 + met.no compact（均免 key + CORS 全开）
+    //   ③ 互为兜底，全失败才报错
+    // ① wttr.in via proxy
     try {
-      const body = await proxy(`https://wttr.in/${loc}?format=%C,+%t,+humidity+%h,+wind+%w&m`);
-      if (body && !body.trim().startsWith('<') && !/Unknown|ERROR/i.test(body.slice(0, 60))) {
-        return { success: true, output: `${args.location}: ${body.trim().slice(0, 300)}` };
+      const locEnc = encodeURIComponent(loc);
+      const body = await this._proxyBody(`https://wttr.in/${locEnc}?format=%C,+%t,+humidity+%h,+wind+%w&m`, ctx, { 'User-Agent': 'curl/8.0' });
+      if (body && !body.trim().startsWith('<') && !/Unknown|ERROR|blocked/i.test(body.slice(0, 60))) {
+        return { success: true, output: `${loc}: ${body.trim().slice(0, 300)}` };
+      }
+    } catch (e) { /* static mode has no proxy — try met.no below */ }
+    // ② met.no (browser-reachable, CORS-open)
+    try {
+      let lat = null, lon = null, place = loc;
+      const nom = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(loc), { headers: { 'Accept': 'application/json' } });
+      const nj = await nom.json();
+      if (nj && nj[0]) {
+        lat = parseFloat(nj[0].lat); lon = parseFloat(nj[0].lon);
+        place = (nj[0].display_name || loc).split(',').slice(0, 2).join(',');
+      }
+      if (lat !== null) {
+        const mr = await fetch(`https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${lat}&lon=${lon}`);
+        if (mr.ok) {
+          const mj = await mr.json();
+          const ts = mj.properties?.timeseries?.[0];
+          const d = ts?.data?.instant?.details || {};
+          const sym = ts?.data?.next_1_hours?.summary?.symbol_code || '';
+          const desc = this._metnoText(sym);
+          if (d.air_temperature !== undefined) {
+            return { success: true, output: `${place}: ${desc}, ${Math.round(d.air_temperature)}°C, Humidity ${Math.round(d.relative_humidity?.humidity ?? d.relative_humidity ?? 0)}%, Wind ${Math.round(d.wind_speed ?? 0)}km/h` };
+          }
+        }
       }
     } catch (e) { /* fall through */ }
-    // 2) 兑底 j1 JSON（截断容错：只解析 current_condition 头部）
+    // ③ open-meteo 最后尝试（每日限额可能已耗尽，尽力而为）
     try {
-      const body = await proxy(`https://wttr.in/${loc}?format=j1`);
-      let cur = {};
-      try { cur = (JSON.parse(body).current_condition || [])[0] || {}; }
-      catch (e2) {
-        const m = body.match(/"temp_C":"(-?\d+)"/);
-        const d = body.match(/"weatherDesc":\[\{"value":"([^"]+)"/);
-        const h = body.match(/"humidity":"(\d+)"/);
-        if (m) cur = { temp_C: m[1], weatherDesc: [{ value: d ? d[1] : '?' }], humidity: h ? h[1] : '?' };
+      const geo = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=' + encodeURIComponent(loc));
+      const g = await geo.json();
+      const hit = g.results && g.results[0];
+      if (hit) {
+        const wResp = await fetch('https://api.open-meteo.com/v1/forecast?latitude=' + hit.latitude + '&longitude=' + hit.longitude + '&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m');
+        const w = await wResp.json();
+        if (w.current && w.current.temperature_2m !== undefined) {
+          const c = w.current;
+          return { success: true, output: `${hit.name}${hit.country ? ', ' + hit.country : ''}: ${this._wmoText(c.weather_code)}, ${c.temperature_2m}°C, Humidity ${c.relative_humidity_2m}%, Wind ${c.wind_speed_10m}km/h` };
+        }
       }
-      if (cur.temp_C !== undefined) {
-        return { success: true, output: `${args.location}: ${cur.weatherDesc?.[0]?.value || '?'}, ${cur.temp_C}°C, Humidity ${cur.humidity}%` };
-      }
-      return { success: false, error: `Weather data unavailable for ${args.location} (upstream returned no parseable data)` };
-    } catch (e) {
-      return { success: false, error: `Weather fetch failed: ${e.message}` };
-    }
+    } catch (e) { /* final fall through */ }
+    return { success: false, error: `Weather data unavailable for ${loc} (all three sources failed)` };
+  },
+
+  // met.no symbol_code → 文本（按前缀归并）
+  _metnoText(sym) {
+    if (!sym) return 'Unknown';
+    const s = sym.split('_')[0];
+    const map = { clearsky: 'Clear sky', fair: 'Fair', partlycloudy: 'Partly cloudy', cloudy: 'Cloudy', rain: 'Rain', lightrain: 'Light rain', heavyrain: 'Heavy rain', rainshowers: 'Rain showers', snow: 'Snow', lightsnow: 'Light snow', heavysnow: 'Heavy snow', snowshowers: 'Snow showers', sleet: 'Sleet', fog: 'Fog', thunder: 'Thunderstorm' };
+    return map[s] || sym;
+  },
+
+  // WMO weather code → 文本（open-meteo 标准）
+  _wmoText(code) {
+    const map = { 0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast', 45: 'Fog', 48: 'Depositing rime fog', 51: 'Light drizzle', 53: 'Moderate drizzle', 55: 'Dense drizzle', 56: 'Light freezing drizzle', 57: 'Dense freezing drizzle', 61: 'Slight rain', 63: 'Moderate rain', 65: 'Heavy rain', 66: 'Light freezing rain', 67: 'Heavy freezing rain', 71: 'Slight snow', 73: 'Moderate snow', 75: 'Heavy snow', 77: 'Snow grains', 80: 'Slight rain showers', 81: 'Moderate rain showers', 82: 'Violent rain showers', 85: 'Slight snow showers', 86: 'Heavy snow showers', 95: 'Thunderstorm', 96: 'Thunderstorm with slight hail', 99: 'Thunderstorm with heavy hail' };
+    return map[code] !== undefined ? map[code] + ' (code ' + code + ')' : 'Unknown (code ' + code + ')';
   },
 
   // web-proxy POST 的公共小封装（返回 body 文本；可覆盖请求头）

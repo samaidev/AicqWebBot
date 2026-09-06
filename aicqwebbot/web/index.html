@@ -1,0 +1,101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AicqWebBot — Your browser is the agent's container</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
+<link rel="stylesheet" href="/static/agent/agent-styles.css">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+
+<!-- ═══════════ Setup panel (shown when no agent configured) ═══════════ -->
+<div id="setupPanel" class="panel">
+  <div class="setup-card">
+    <div class="setup-head">
+      <div class="setup-logo">🤖</div>
+      <h1>AicqWebBot</h1>
+      <p class="setup-sub">Your browser is the agent's container.<br>Configure a model, then chat — everything runs locally.</p>
+    </div>
+
+    <form id="setupForm" autocomplete="off">
+      <label>Agent name</label>
+      <input id="f_name" type="text" value="My Agent" required>
+
+      <label>System prompt</label>
+      <textarea id="f_prompt" rows="3" placeholder="You are a helpful assistant...">You are a helpful AI agent. Be concise and helpful.</textarea>
+
+      <label>Provider</label>
+      <select id="f_provider">
+        <option value="opencode">Free model — no API key needed (OpenCode Zen)</option>
+        <option value="openai">OpenAI-compatible — your own API key</option>
+      </select>
+
+      <div id="grpOpenAI">
+        <label>API base URL</label>
+        <input id="f_baseurl" type="text" placeholder="https://api.openai.com/v1">
+        <label>Model</label>
+        <input id="f_model" type="text" placeholder="gpt-4o-mini">
+        <label>API key <span class="hint">— stays in your browser, never uploaded</span></label>
+        <input id="f_apikey" type="password" placeholder="sk-...">
+      </div>
+
+      <div id="grpFree">
+        <label>Model</label>
+        <select id="f_freeModel">
+          <option value="nemotron-3.5-lightning-free">Nemotron 3.5 Lightning (Free)</option>
+          <option value="nemotron-3-ultra-free">Nemotron 3 Ultra (Free)</option>
+        </select>
+        <label>API key <span class="hint">— optional, anonymous works</span></label>
+        <input id="f_freeKey" type="password" placeholder="(optional)">
+      </div>
+
+      <div class="row2">
+        <div>
+          <label>Code sandbox</label>
+          <select id="f_sandbox">
+            <option value="javascript">JavaScript (QuickJS)</option>
+            <option value="python">Python (Pyodide)</option>
+          </select>
+        </div>
+        <div>
+          <label>Language</label>
+          <select id="f_lang">
+            <option value="en">English</option>
+            <option value="zh">中文</option>
+          </select>
+        </div>
+      </div>
+
+      <label class="tools-label">Tools <span class="hint">— click to toggle</span></label>
+      <div id="f_tools" class="tools-grid"></div>
+
+      <button type="submit" class="btn-primary" id="btnSave">Save &amp; Start Chat</button>
+      <p class="foot">Agent state lives in your browser (IndexedDB) · Server is a stateless relay · <a href="https://github.com/samaidev/AicqWebBot" target="_blank">GitHub</a> · <a href="https://aicq.me" target="_blank">aicq.me</a></p>
+    </form>
+  </div>
+</div>
+
+<!-- ═══════════ Chat panel ═══════════ -->
+<div id="chatPanel" class="panel hidden">
+  <header id="chatHead">
+    <button id="btnSettings" title="Settings">⚙</button>
+    <div class="head-info">
+      <span id="agentName">Agent</span>
+      <span id="csLabel" class="cs-label">session</span>
+    </div>
+    <button id="btnNewSession" title="New session">＋</button>
+  </header>
+
+  <main id="msgFlow"></main>
+
+  <footer id="composer">
+    <textarea id="inputBox" rows="1" placeholder="Type a message... (Enter to send, Shift+Enter for newline)"></textarea>
+    <button id="btnSend" title="Send">➤</button>
+  </footer>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

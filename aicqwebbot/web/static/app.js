@@ -241,9 +241,15 @@
     $('setupPanel').classList.remove('hidden');
     $('chatPanel').classList.add('hidden');
     await loadToolChips(existing && existing.tools ? existing.tools : DEFAULT_TOOLS);
-    const prov = existing && existing.llm_config ? (existing.llm_config.provider || 'opencode') : 'opencode';
-    $('f_provider').value = prov === 'opencode' ? 'opencode' : 'openai';
+    const isStatic = !!window.__STATIC_MODE;
+    const prov = existing && existing.llm_config ? (existing.llm_config.provider || 'opencode') : (isStatic ? 'openai' : 'opencode');
+    $('f_provider').value = (prov === 'opencode' && !isStatic) ? 'opencode' : 'openai';
     syncProvider();
+    if (isStatic) {
+      // static hosting: no local relay — the free anonymous provider cannot be
+      // reached directly (its API blocks browser CORS), so hide that option
+      $('f_provider').querySelector('option[value="opencode"]').disabled = true;
+    }
     if (existing) {
       $('f_name').value = existing.name || '';
       $('f_prompt').value = existing.system_prompt || '';
@@ -375,6 +381,11 @@
   });
 
   (async function boot() {
+    // wait (max 1.5s) for static/relay mode detection before first render
+    const t0 = Date.now();
+    while (!window.__modeReady && Date.now() - t0 < 1500) {
+      await new Promise(r => setTimeout(r, 50));
+    }
     try {
       const AgentStorage = (await import(_agUrl('agent-storage.js'))).default;
       const id = localStorage.getItem(AGENT_ID_KEY);
@@ -392,4 +403,72 @@
 
   // expose LocalBus deliver for tests
   window.__deliver = (obj) => window.__localBus && window.__localBus.deliver(obj);
+
+  // ═══════════ 7. Static-hosting mode ═══════════
+  // When the shell is served from a purely static host (HF Static Space,
+  // GitHub Pages, any CDN) there is no local relay — /healthz will not
+  // return JSON. In that mode we shim fetch so the UNMODIFIED engine's
+  // proxy calls resolve client-side:
+  //   llm-proxy    -> direct connect to the model API (BYOK, CORS-aware)
+  //   search-proxy -> DuckDuckGo Instant Answer API (CORS-open)
+  //   web-proxy    -> direct fetch (gracefully degrades when CORS blocks)
+  const RealFetch = window.fetch.bind(window);
+
+  function jsonResp(obj, status) {
+    return Promise.resolve(new Response(JSON.stringify(obj),
+      { status: status || 200, headers: { 'Content-Type': 'application/json' } }));
+  }
+
+  async function shimProxy(url, init) {
+    if (url.includes('/api/v1/agent/llm-proxy')) {
+      try {
+        const p = JSON.parse(init && init.body || '{}');
+        return RealFetch(p.target_url, {
+          method: p.method || 'POST', headers: p.headers || {}, body: p.body,
+        });
+      } catch (e) { return jsonResp({ error: 'bad proxy request: ' + e }, 400); }
+    }
+    if (url.includes('/api/v1/agent/search-proxy')) {
+      try {
+        const q = (JSON.parse(init && init.body || '{}').query) || '';
+        const r = await RealFetch('https://api.duckduckgo.com/?format=json&no_html=1&skip_disambig=1&q=' + encodeURIComponent(q));
+        const d = await r.json();
+        const results = (d.RelatedTopics || [])
+          .filter(t => t.FirstURL && t.Text)
+          .slice(0, 10)
+          .map(t => ({ title: t.Text.split(' - ')[0], url: t.FirstURL, summary: t.Text }));
+        return jsonResp({ results });
+      } catch (e) { return jsonResp({ error: 'search failed: ' + e }, 502); }
+    }
+    if (url.includes('/api/v1/agent/web-proxy')) {
+      try {
+        const p = JSON.parse(init && init.body || '{}');
+        const r = await RealFetch(p.url, {
+          method: p.method || 'GET', headers: p.headers || {},
+          body: p.body && (p.method || 'GET').toUpperCase() !== 'GET' ? p.body : undefined,
+        });
+        const text = await r.text();
+        return jsonResp({ status: r.status, body: text.slice(0, 20000) });
+      } catch (e) {
+        return jsonResp({ status: 0, body: 'Direct fetch blocked (CORS or offline): ' + e }, 200);
+      }
+    }
+    return RealFetch(url, init);
+  }
+
+  fetch('/healthz')
+    .then(r => (r.ok && (r.headers.get('content-type') || '').includes('json')))
+    .then(ok => {
+      if (!ok) {
+        window.__STATIC_MODE = true;
+        window.fetch = shimProxy;
+        console.log('[AicqWebBot] static mode: no local relay — LLM calls connect directly (BYOK)');
+      }
+    })
+    .catch(() => {
+      window.__STATIC_MODE = true;
+      window.fetch = shimProxy;
+      console.log('[AicqWebBot] static mode (no relay reachable): direct LLM connections enabled');
+    })
+    .finally(() => { window.__modeReady = true; });
 })();

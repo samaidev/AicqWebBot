@@ -889,8 +889,8 @@
   //                   headers so the browser can never read it directly;
   //                   other OpenAI-compatible endpoints connect directly
   //                   (BYOK; CORS-open providers work out of the box)
-  //   search-proxy -> DuckDuckGo Instant Answer API (CORS-open)
-  //   web-proxy    -> direct fetch (gracefully degrades when CORS blocks)
+  //   search-proxy -> aicq.me PUBLIC SEARCH RELAY (multi-engine, then DDG IA fallback)
+  //   web-proxy    -> aicq.me PUBLIC WEB RELAY (read-only fetch; direct-fetch fallback)
   const RealFetch = window.fetch.bind(window);
 
   // Public relay on aicq.me: protocol identical to /api/v1/agent/llm-proxy,
@@ -960,16 +960,34 @@
       } catch (e) { return jsonResp({ error: 'search failed: ' + e }, 502); }
     }
     if (url.includes('/api/v1/agent/web-proxy')) {
+      // [2026-09-07] web_read/url_read 在静态形态原先直连 fetch —— 绝大多数网站
+      // 不发 CORS 头，工具必挂（用户实测 web_read 跨域被拦）。现改走 aicq.me
+      // 公共 web 中继（协议与登录版 web-proxy 完全一致：{url,mode,method,headers,
+      // body} -> {status, body}；SSRF 校验 + 头白名单 + 限流）。中继不可达时
+      // 回退旧的直连路径（CORS-open 站点仍可用）。
+      let p0;
+      try { p0 = JSON.parse(init && init.body || '{}'); }
+      catch (e) { return jsonResp({ error: 'bad proxy request: ' + e }, 400); }
       try {
-        const p = JSON.parse(init && init.body || '{}');
-        const r = await RealFetch(p.url, {
-          method: p.method || 'GET', headers: p.headers || {},
-          body: p.body && (p.method || 'GET').toUpperCase() !== 'GET' ? p.body : undefined,
+        const rw = await RealFetch('https://aicq.me/api/v1/public/web-relay', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(p0),
+        });
+        if (rw.ok) {
+          const dw = await rw.json();
+          return jsonResp({ status: dw.status, body: dw.body || '', mode: p0.mode });
+        }
+      } catch (e) { /* relay unreachable — fall through to direct */ }
+      try {
+        const r = await RealFetch(p0.url, {
+          method: p0.method || 'GET', headers: p0.headers || {},
+          body: p0.body && (p0.method || 'GET').toUpperCase() !== 'GET' ? p0.body : undefined,
         });
         const text = await r.text();
         return jsonResp({ status: r.status, body: text.slice(0, 20000) });
       } catch (e) {
-        return jsonResp({ status: 0, body: 'Direct fetch blocked (CORS or offline): ' + e }, 200);
+        return jsonResp({ status: 0, body: 'Direct fetch blocked (CORS or offline), and the aicq.me public web relay was unreachable: ' + e }, 200);
       }
     }
     return RealFetch(url, init);
@@ -981,12 +999,16 @@
       if (!ok) {
         window.__STATIC_MODE = true;
         window.fetch = shimProxy;
+        // [2026-09-07] 沙箱网络桥（同步 XHR）的目标端点：静态形态没有同源
+        // web-proxy，指向 aicq.me 公共 web-relay；其余形态默认同源。
+        window.__AICQ_PROXY_TARGET__ = 'https://aicq.me/api/v1/public/web-relay';
         console.log('[AicqWebBot] static mode: no local relay — free OpenCode models go through the aicq.me public relay, BYOK endpoints connect directly');
       }
     })
     .catch(() => {
       window.__STATIC_MODE = true;
       window.fetch = shimProxy;
+      window.__AICQ_PROXY_TARGET__ = 'https://aicq.me/api/v1/public/web-relay';
       console.log('[AicqWebBot] static mode (no relay reachable): free models via aicq.me public relay, BYOK direct');
     })
     .finally(() => { window.__modeReady = true; });

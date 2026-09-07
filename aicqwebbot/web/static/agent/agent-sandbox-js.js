@@ -48,9 +48,13 @@ const AgentSandboxJS = {
       _listDir: (dir) => Object.keys(fsData).filter(k => k.startsWith(dir)),
       _deleteFile: (path) => { delete fsData[path]; },
       fetch: async (url, opts) => {
-        // 通过 aicq 代理
+        // 通过 aicq 代理（[ADD 2026-09-07] 补鉴权头 —— aicq.me 登录形态的
+        // web-proxy 需 Bearer token；本地/静态形态无鉴权，多余头无害）
+        const _tk = (ctx && ctx.agentConfig && ctx.agentConfig.access_token)
+          || (typeof S !== 'undefined' && S.accessToken) || '';
         const resp = await fetch('/api/v1/agent/web-proxy', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + _tk },
           body: JSON.stringify({ url, mode: 'raw', method: opts?.method || 'GET',
             headers: opts?.headers || {}, body: opts?.body || '' })
         });
@@ -65,8 +69,11 @@ const AgentSandboxJS = {
 
     try {
       // 用 Function 构造器创建沙箱（比 eval 稍安全）
-      const fn = new Function(...Object.keys(sandbox), args.code || '');
-      const result = fn(...Object.values(sandbox));
+      // [ADD 2026-09-07] 包一层 async IIFE —— 用户代码里的 await fetch(...)
+      // 才能工作（命令行风格的网络代码全靠它）
+      const fn = new Function(...Object.keys(sandbox),
+        'return (async()=>{' + (args.code || '') + '\n})()');
+      const result = await fn(...Object.values(sandbox));
       if (result !== undefined) output += String(result) + '\n';
 
       // 持久化文件系统变更

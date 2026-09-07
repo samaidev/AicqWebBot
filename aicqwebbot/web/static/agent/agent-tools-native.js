@@ -59,7 +59,7 @@ const AgentToolsNative = {
       title.includes('Access denied'),
     ];
     if (_cfSignals.some(Boolean)) {
-      return { success: false, error: '目标网页被 Cloudflare/anti-bot 保护，无法通过 HTTP 代理读取内容。建议换一个网页，或用搜索引擎缓存版本（如 Google cache）。', output: 'Error: Target page is protected by Cloudflare anti-bot challenge. The page returned a JS challenge instead of actual content. Please try a different URL.' };
+      return { success: false, error: 'Target page is protected by Cloudflare/anti-bot — its content cannot be read through the HTTP proxy. Try a different URL or a cached/search version of the page.', output: 'Error: Target page is protected by Cloudflare anti-bot challenge. The page returned a JS challenge instead of actual content. Please try a different URL.' };
     }
     const links = Array.from(doc.querySelectorAll('a[href]')).slice(0, 20).map(a => ({ text: a.innerText.slice(0,80), href: a.href }));
     return { success: true, output: `Title: ${title}\n\n${text}`, title, links };
@@ -2041,7 +2041,7 @@ const AgentToolsNative = {
   async search_session_history(args, ctx) {
     const keyword = String((args && args.keyword) || '').trim();
     if (!keyword) {
-      return { success: false, error: 'keyword is required (e.g. keyword="部署流程" or keyword="api key")' };
+      return { success: false, error: 'keyword is required (e.g. keyword="deploy flow" or keyword="api key")' };
     }
     const sessionId = String((args && args.session_id) || (ctx && ctx.sessionId) || '').trim();
     if (!sessionId) {
@@ -2056,16 +2056,16 @@ const AgentToolsNative = {
     if (!matches || matches.length === 0) {
       return { success: true, output: `No history records matching "${keyword}" in session ${sessionId}. Try a different keyword (shorter, or in the other language).`, count: 0 };
     }
-    const ROLE_CN = { user: '用户', assistant: '智能体', tool: '工具结果' };
+    const ROLE_CN = { user: 'user', assistant: 'agent', tool: 'tool result' };
     const lines = matches.map((m, i) => {
       const role = ROLE_CN[m.role] || m.role;
-      const tcNote = (m.tool_calls && m.tool_calls.length) ? ` [工具调用: ${m.tool_calls.join(', ')}]` : '';
+      const tcNote = (m.tool_calls && m.tool_calls.length) ? ` [tool calls: ${m.tool_calls.join(', ')}]` : '';
       return `${i + 1}. [${m.created_at}] ${role}${tcNote}: ${m.content}`;
     });
     return {
       success: true,
       count: matches.length,
-      output: `会话 ${sessionId} 中匹配 "${keyword}" 的历史记录（最新 ${matches.length} 条，按时间倒序）：\n\n` + lines.join('\n\n')
+      output: `History in session ${sessionId} matching "${keyword}" (newest ${matches.length}, newest first):\n\n` + lines.join('\n\n')
     };
   },
 

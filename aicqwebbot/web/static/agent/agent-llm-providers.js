@@ -67,7 +67,7 @@ function _ocModelLabel(id) {
   const upper = { gpt: 'GPT', glm: 'GLM', ai: 'AI', llm: 'LLM' };
   const words = core.split('-').filter(Boolean).map(w =>
     upper[w] || (/^[0-9]/.test(w) ? w : w.charAt(0).toUpperCase() + w.slice(1)));
-  return words.join(' ') + (isFree ? ' (Free)' : ' (需 API Key)');
+  return words.join(' ') + (isFree ? ' (Free)' : ' (API key required)');
 }
 
 // 从 /models 返回的 id 列表构建目录；组内 free 优先、保持上游相对顺序
@@ -286,9 +286,9 @@ async function testOpenCodeConnection(llmConfig) {
     if (data.type === 'error') return { ok: false, error: _opencodeErrorHint(200, text) };
     let preview = '';
     if (isResponses) {
-      preview = (data.output_text || _responsesOutputText(data) || '(空响应)');
+      preview = (data.output_text || _responsesOutputText(data) || '(empty response)');
     } else {
-      preview = (data.choices?.[0]?.message?.content?.slice(0, 60) || '(空响应)');
+      preview = (data.choices?.[0]?.message?.content?.slice(0, 60) || '(empty response)');
     }
     return { ok: true, preview, model: data.model || llmConfig.model };
   } catch(e) {
@@ -353,14 +353,14 @@ function _opencodeErrorHint(status, bodyText) {
   errMsg = String(errMsg || '').trim();
   const upstreamDown = _isOpenCodeUpstreamError(status, bodyText);
   let hint = '';
-  if (errType === 'FreeUsageLimitError') hint = ' — 免费额度限流，稍后再试 / 换个免费模型 / 填写 Zen API Key';
-  else if (errType === 'RegionError') hint = ' — 该模型在当前区域不可用，请换模型';
-  else if (errType === 'AuthError') hint = ' — 该模型需要 API Key（付费模型），或 Key 无效';
-  else if (upstreamDown) hint = ' — 上游模型暂时不可用（OpenCode 将上游故障报为 HTTP ' + status + '）：稍后重发，或在 LLM 配置里换个免费模型';
-  else if (status === 502) hint = ' — 代理无法连接 opencode.ai（网络/DNS/TLS）';
-  else if (status === 404) hint = ' — 端点不存在，检查 API 类型';
-  else if (status === 400) hint = ' — 请求格式错误（模型名或参数不兼容）';
-  if (!errMsg) errMsg = '(上游未返回错误详情)';
+  if (errType === 'FreeUsageLimitError') hint = ' — free tier rate limit; retry later, switch to another free model, or set a Zen API key';
+  else if (errType === 'RegionError') hint = ' — this model is not available in your region; switch models';
+  else if (errType === 'AuthError') hint = ' — this model requires an API key (paid), or the key is invalid';
+  else if (upstreamDown) hint = ' — upstream model temporarily unavailable (OpenCode reports the upstream failure as HTTP ' + status + '): retry later or switch free models in the LLM settings';
+  else if (status === 502) hint = ' — relay cannot reach opencode.ai (network/DNS/TLS)';
+  else if (status === 404) hint = ' — endpoint not found; check the API type';
+  else if (status === 400) hint = ' — bad request (model name or parameters incompatible)';
+  if (!errMsg) errMsg = '(no error details returned by upstream)';
   return `HTTP ${status} ${errType ? '[' + errType + '] ' : ''}${errMsg.slice(0, 200)}${hint}`;
 }
 

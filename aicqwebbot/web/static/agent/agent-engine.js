@@ -768,7 +768,7 @@ const AgentEngine = {
           // 非流式能拿到真实错误(502/503 可见)或完整 content
           const forceNonStream = emptyRetries >= 3;
           console.warn(`[AgentEngine._agentLoop] LLM empty content, auto-retry ${emptyRetries}/5 in ${delay}ms (nonStream=${forceNonStream})`);
-          this._sendStreamChunk(config.agent_id, replyTarget, config, `(LLM 空回复，自动重试 ${emptyRetries}/5${forceNonStream ? '·非流式' : ''}...)`, 'thinking');
+          this._sendStreamChunk(config.agent_id, replyTarget, config, `(LLM empty reply — auto-retry ${emptyRetries}/5${forceNonStream ? ' · non-stream' : ''}...)`, 'thinking');
           await new Promise(r => setTimeout(r, delay));
           // [2026-09-06] 同样经 _callLLMRetry 包装（429 指数退避）
           llmResp = await this._callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream);
@@ -781,7 +781,7 @@ const AgentEngine = {
           }
         } else {
           console.warn('[AgentEngine._agentLoop] LLM empty content after 5 auto-retries, stopping loop');
-          this._sendStreamChunk(config.agent_id, replyTarget, config, '(LLM 连续多次空回复 — 免费模型当前过载，请稍后重试或在设置中更换模型)', 'text');
+          this._sendStreamChunk(config.agent_id, replyTarget, config, '(LLM returned empty replies repeatedly — the free model is overloaded. Try again later or switch models in Settings)', 'text');
           break;
         }
       }
@@ -822,7 +822,7 @@ const AgentEngine = {
         attempt++;
         console.warn(`[AgentEngine._callLLMRetry] HTTP 429 rate-limited — exponential backoff retry ${attempt}/${MAX_429_RETRIES} in ${Math.round(delay / 1000)}s`);
         this._sendStreamChunk(config.agent_id, replyTarget, config,
-          `(模型限流 429 — ${Math.round(delay / 1000)}s 后自动重试 ${attempt}/${MAX_429_RETRIES}...)`, 'thinking');
+          `(Model rate-limited (HTTP 429) — auto-retry ${attempt}/${MAX_429_RETRIES} in ${Math.round(delay / 1000)}s...)`, 'thinking');
         await new Promise(res => setTimeout(res, delay));
         continue;
       }
@@ -1230,16 +1230,16 @@ const AgentEngine = {
       // 提供常见原因提示
       let hint = '';
       if (resp.status === 502) {
-        hint = ' (502 = 代理无法连接到 LLM API。常见原因：网络不通、DNS 失败、API 地址错误、TLS 握手失败)';
+        hint = ' (502 = the relay cannot reach the LLM API. Common causes: network down, DNS failure, wrong API URL, TLS handshake failure)';
       } else if (resp.status === 401 || resp.status === 403) {
-        hint = ' (认证失败 — 检查 API Key / Cookie 是否正确)';
+        hint = ' (Authentication failed — check your API Key / Cookie)';
       } else if (resp.status === 404) {
-        hint = ' (404 — 检查 base_url 是否正确，deepseek 应为 https://api.deepseek.com/v1)';
+        hint = ' (404 — check base_url; for deepseek it should be https://api.deepseek.com/v1)';
       } else if (resp.status === 503) {
         // 503 通常是上游 API 拒绝请求 — 可能是不支持 function calling
-        hint = ' (503 = 上游模型不可用。如果测试按钮能通但聊天报 503，通常是 API 代理不支持 function calling。请在 LLM 配置里开启「兼容模式」)';
+        hint = ' (503 = upstream model unavailable. If the test button works but chat returns 503, the API relay likely does not support function calling — enable "Compat Mode" in the LLM settings)';
       } else if (resp.status === 400) {
-        hint = ' (400 = 请求格式错误 — 可能是 API 代理不支持 tools 参数。请在 LLM 配置里开启「兼容模式」)';
+        hint = ' (400 = bad request — the API relay may not support the tools parameter; enable "Compat Mode" in the LLM settings)';
       }
       // [2026-09-04] LLM 日志：HTTP 失败
       this._logLLM({ provider, model: llmConfig.model, status: resp.status,
@@ -1514,7 +1514,7 @@ const AgentEngine = {
             console.warn(`[AgentEngine._callOpenCode] 模型 ${llmConfig.model} 上游不可用（HTTP ${resp.status}），自动切换到 ${next}`);
             if (replyTarget) {
               this._sendStreamChunk(config.agent_id, replyTarget, config,
-                `\n[免费模型 ${llmConfig.model} 上游不可用，自动切换到 ${next} 重试]\n`, 'reasoning');
+                `\n[Free model ${llmConfig.model} upstream unavailable — auto-switching to ${next}]\n`, 'reasoning');
             }
             const fc = { ...config, llm_config: { ...llmConfig, model: next, api_type: 'openai-completion' } };
             return await this._callOpenCode(messages, tools, fc, replyTarget, false, _forceNonStream, [...tried, next]);
@@ -2086,18 +2086,18 @@ const AgentEngine = {
     // 导致 LLM 看到工具结果时模式匹配成「第1段」并回复「好的，我已收到第1段」就停下。
     // 这里加一个强提示，明确告诉 LLM 这是一条完整消息，不是分段消息，必须立即回复。
     const userQuestion = [...messages].reverse().find(m => m.role === 'user')?.content || '';
-    let content = '[重要：以下是一条完整的工具执行结果，不是分段消息。请立即阅读全部内容并根据结果回复用户，无需等待后续分段，不要回复「已收到第1段」之类的话。]\n\n<tool_results>\n';
+    let content = '[IMPORTANT: the following is ONE complete tool-execution result, not a segmented message. Read all of it now and reply to the user based on it — do not wait for further segments and do not say "received part 1".]\n\n<tool_results>\n';
     // [FIX] 截断过长的工具结果，避免触发 scnet 分段发送导致 LLM 混淆
     // scnet 单段安全阈值约 8000 字符，每个工具结果最多保留 4000 字符
     const MAX_TOOL_RESULT_LEN = 4000;
     for (const tr of toolResults) {
       let tc = tr.content || '';
       if (tc.length > MAX_TOOL_RESULT_LEN) {
-        tc = tc.substring(0, MAX_TOOL_RESULT_LEN) + '\n... [结果已截断，原始长度 ' + tc.length + ' 字符]';
+        tc = tc.substring(0, MAX_TOOL_RESULT_LEN) + '\n... [truncated, original length ' + tc.length + ' chars]';
       }
       content += `<tool_result tool_call_id="${tr.tool_call_id || ''}">\n${tc}\n</tool_result>\n\n`;
     }
-    content += `</tool_results>\n\n[用户原始问题] ${userQuestion}\n\n请根据以上工具返回的结果继续回答用户的问题。如果结果足以回答，请直接给出最终答案（用中文）；如果需要调用更多工具，请继续调用。不要说"工具没有返回有效结果"——工具结果就在上面的 <tool_result> 标签里。`;
+    content += `</tool_results>\n\n[User's original question] ${userQuestion}\n\nContinue answering the user based on the tool results above. If they are sufficient, give the final answer directly (reply in the same language as the user's message); if more tool calls are needed, continue calling tools. Never say "the tool returned no valid result" — the results are inside the <tool_result> tags above.`;
     return content;
   },
 

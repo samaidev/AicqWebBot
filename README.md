@@ -26,7 +26,7 @@ aicqwebbot.run(8386)
 ```
 
 ```
-Open http://localhost:8386 → pick a free model (no key needed) or paste
+Open http://localhost:8386 → paste
 your OpenAI-compatible key → chat.
 ```
 

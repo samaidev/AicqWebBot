@@ -5,8 +5,8 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>AicqWebBot — Your browser is the agent's container</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
-<link rel="stylesheet" href="/static/agent/agent-styles.css?v=0.4.8">
-<link rel="stylesheet" href="/static/app.css?v=0.4.8">
+<link rel="stylesheet" href="/static/agent/agent-styles.css?v=0.4.9">
+<link rel="stylesheet" href="/static/app.css?v=0.4.9">
 </head>
 <body>
 
@@ -29,12 +29,8 @@
       <label>System prompt</label>
       <textarea id="f_prompt" rows="3" placeholder="You are a helpful assistant...">You are a helpful AI agent. Be concise and helpful.</textarea>
 
-      <label>Provider</label>
-      <select id="f_provider">
-        <option value="opencode">Free model — no API key needed (OpenCode Zen)</option>
-        <option value="openai">OpenAI-compatible — your own API key</option>
-      </select>
-
+      <!-- [2026-09-07] OpenCode Zen 免费模型已下线（上游取消免费额度），供应商选择整体移除；
+           仅保留 BYOK（OpenAI-compatible，自带 Key） -->
       <div id="grpOpenAI">
         <label>API base URL</label>
         <input id="f_baseurl" type="text" placeholder="https://api.openai.com/v1">
@@ -49,18 +45,6 @@
         <div id="f_apiHint" class="api-hint"></div>
         <label>API key <span class="hint">— stays in your browser, never uploaded</span></label>
         <input id="f_apikey" type="password" placeholder="sk-...">
-      </div>
-
-      <div id="grpFree">
-        <label>Model <span class="hint">— free models first, no key needed</span></label>
-        <select id="f_freeModel"><option value="">loading…</option></select>
-        <div id="f_freeModelCustomGroup" class="custom-model-group" style="display:none">
-          <label>Custom model ID</label>
-          <input id="f_freeModelCustom" type="text" placeholder="e.g. gpt-5.4-mini">
-        </div>
-        <div id="f_ocApiHint" class="api-hint"></div>
-        <label>API key <span class="hint">— optional, anonymous works</span></label>
-        <input id="f_freeKey" type="password" placeholder="(optional)">
       </div>
 
       <div class="row2">
@@ -83,7 +67,7 @@
       <label class="tools-label">Tools <span class="hint">— click to toggle</span></label>
       <div id="f_tools" class="tools-grid"></div>
 
-      <div id="staticNote" class="static-note hidden">Static hosting: free OpenCode models are relayed through aicq.me's public relay (rate-limited). For a private relay run <code>pip install aicqwebbot</code> + <code>aicqwebbot.run(8386)</code> — BYOK keys to CORS-open endpoints also connect directly.</div>
+      <div id="staticNote" class="static-note hidden">Static hosting: search / web-read run through aicq.me's public relays (rate-limited). BYOK endpoints connect directly — CORS-open providers work out of the box; for full CORS freedom run your own relay: <code>pip install aicqwebbot</code> + <code>aicqwebbot.run(8386)</code>.</div>
       <button type="submit" class="btn-primary" id="btnSave">Save &amp; Start Chat</button>
       <p class="foot">Agent state lives in your browser (IndexedDB) · Server is a stateless relay · <a href="https://github.com/samaidev/AicqWebBot" target="_blank">GitHub</a> · <a href="https://aicq.me" target="_blank">aicq.me</a></p>
     </form>
@@ -113,6 +97,6 @@
 </div>
 
 <!-- v=0.4.4 cache-buster: bump on every shell release so browsers never run a stale UI -->
-<script src="/static/app.js?v=0.4.8"></script>
+<script src="/static/app.js?v=0.4.9"></script>
 </body>
 </html>

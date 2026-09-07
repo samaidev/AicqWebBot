@@ -2045,13 +2045,11 @@ const AgentToolsNative = {
   },
 
   // ══ analyze-image [2026-09-03] ═══════════════════════════════════
-  // 图片识别工具：agent 主模型多数不带视觉（免费模型带图直接 400），
-  // 收图时引擎把图片存入 _lastImages 槽位，主模型只收文字占位符；
-  // 模型需要看图时调用本工具 → 经 llm-proxy 调用带视觉的免费模型。
-  // 视觉模型实测（2026-09-03，OpenCode Zen 全部 8 个 free 模型）：
-  //   mimo-v2.5-free ✅ 唯一能看图且答对；其余 chat 端 free 带图 400；
-  //   muse-spark 走 /responses 且区域受限。故链路以 mimo 为默认，
-  //   后接 nemotron/deepseek/laguna 作地域差异兜底；成功模型写 localStorage 缓存。
+  // 图片识别工具：收图时引擎把图片存入 _lastImages 槽位；
+  // 模型需要看图时调用本工具 → 经 llm-proxy 用【用户自配的 BYOK 模型】看图。
+  // [2026-09-07] 原 OpenCode Zen 免费视觉链已随 OpenCode 下线移除；
+  // 现直接用 agent 当前 llm_config（chat/completions 或 responses 按协议路由），
+  // 模型不支持视觉时返回明确错误，提示用户在设置里换 vision 模型。
   _lastImages: {},   // sessionId → { dataUrl, ts }
 
   rememberImage(sessionId, dataUrl) {
@@ -2101,12 +2099,13 @@ const AgentToolsNative = {
   },
 
   async analyze_image(args, ctx) {
-    // [2026-09-03 服务器实测] muse-spark-1.3 经 /responses + input_image 从 samai.cc 区域可用且答对；
-    // mimo-v2.5-free 直测可看图但从服务器 IP 常退 429 FreeUsageLimitError；
-    // 其余 chat 端 free 模型带图直接 400。链路顺序即实测优先级。
-    const VISION_CHAIN = ['muse-spark-1.3-contributor-free', 'mimo-v2.5-free', 'muse-spark-1.2-contributor-free', 'nemotron-3-ultra-free', 'deepseek-v4-flash-free'];
-    const CACHE_KEY = 'aicq_agent_vision_model_v1';
     const MAX_AGE_MS = 30 * 60 * 1000;   // "最新图片"有效期 30 分钟
+
+    // 0. 用户自配模型（BYOK）— 不再依赖任何免费视觉链
+    const llmConfig = (ctx && ctx.agentConfig && ctx.agentConfig.llm_config) || {};
+    if (!llmConfig.model || (!llmConfig.base_url && llmConfig.provider !== 'openai')) {
+      return { success: false, error: 'No LLM configured for image analysis. Open settings and configure a vision-capable model (e.g. gpt-4o-mini).' };
+    }
 
     // 1. 解析图片来源 → dataURI
     let dataUrl = '';
@@ -2135,32 +2134,17 @@ const AgentToolsNative = {
     const question = String((args && args.question) || '').trim() ||
       '请详细描述这张图片：主要物体/场景、所有可见文字（原样给出）、颜色、品牌或标识，以及值得注意的细节。';
 
-    // 4. 视觉模型链：缓存优先 → 实测可用链
-    let cached = '';
-    try { cached = localStorage.getItem(CACHE_KEY) || ''; } catch (e) {}
-    const chain = [];
-    for (const m of [cached].concat(VISION_CHAIN)) {
-      if (m && chain.indexOf(m) === -1) chain.push(m);
-    }
-    const errors = [];
-    for (const model of chain) {
-      const r = await this._visionDescribe(model, dataUrl, question, ctx);
-      if (r.success) {
-        try { localStorage.setItem(CACHE_KEY, model); } catch (e) {}
-        return { success: true, output: r.output, model: model };
-      }
-      errors.push(model + ': ' + String(r.error || '').slice(0, 140));
-      if (model === cached) { try { localStorage.removeItem(CACHE_KEY); } catch (e) {} }
-    }
-    return { success: false, error: 'All vision models failed — ' + errors.join(' | ') };
+    // 4. 用当前配置的模型看图（不支持视觉时报明确错误）
+    const r = await this._visionDescribe(llmConfig, dataUrl, question, ctx);
+    if (r.success) return { success: true, output: r.output, model: llmConfig.model };
+    return { success: false, error: 'Vision analysis with your configured model (' + llmConfig.model + ') failed — it may not support image input. Configure a vision-capable model in settings. Detail: ' + String(r.error || '').slice(0, 220) };
   },
 
   // 经 llm-proxy 下载图片（解决 CORS + aicq 内部文件的鉴权），返回 dataURI
   async _analyzeFetchImage(url, ctx) {
     const tok = this._authToken(ctx);
     const inner = {};
-    const isInternal = url.indexOf(location.origin) === 0 ||
-                       (url.indexOf('/api/') !== -1 && url.indexOf('opencode') === -1);
+    const isInternal = url.indexOf(location.origin) === 0 || url.indexOf('/api/') !== -1;
     if (isInternal && tok) inner['Authorization'] = 'Bearer ' + tok;
     const resp = await fetch('/api/v1/agent/llm-proxy', {
       method: 'POST',
@@ -2198,22 +2182,25 @@ const AgentToolsNative = {
     } catch (e) { return dataUrl; }
   },
 
-  // 单个视觉模型调用 — 按模型端点协议选格式，经 llm-proxy 中继
-  //   muse-spark-* → /responses (input_image, max_output_tokens 要给足：思考即耗 500+)
-  //   其他        → /chat/completions (image_url)
-  async _visionDescribe(model, dataUrl, question, ctx) {
+  // 单个视觉模型调用 — 用 agent 自配的 llm_config，按协议路由，经 llm-proxy 中继
+  //   api_type='openai-response' → POST {base}/responses (input_image)
+  //   其余（默认）              → POST {base}/chat/completions (image_url)
+  async _visionDescribe(llmConfig, dataUrl, question, ctx) {
     const tok = this._authToken(ctx);
-    const isResponses = String(model).indexOf('muse-spark') === 0;
-    const target = 'https://opencode.ai/zen/v1/' + (isResponses ? 'responses' : 'chat/completions');
+    const isResponses = (llmConfig.api_type === 'openai-response' || llmConfig.api_type === 'response');
+    const base = String(llmConfig.base_url || 'https://api.openai.com/v1').replace(/\/+$/, '');
+    const target = base + (isResponses ? '/responses' : '/chat/completions');
+    const innerHeaders = { 'Content-Type': 'application/json' };
+    if (llmConfig.api_key) innerHeaders['Authorization'] = 'Bearer ' + llmConfig.api_key;
     let innerBody;
     if (isResponses) {
-      innerBody = { model: model, stream: false, max_output_tokens: 4096,
+      innerBody = { model: llmConfig.model, stream: false, max_output_tokens: 4096, store: false,
         input: [{ role: 'user', content: [
           { type: 'input_text', text: question },
           { type: 'input_image', image_url: dataUrl, detail: 'auto' }
         ] }] };
     } else {
-      innerBody = { model: model, stream: false, max_tokens: 1024,
+      innerBody = { model: llmConfig.model, stream: false, max_tokens: 1024,
         messages: [{ role: 'user', content: [
           { type: 'text', text: question },
           { type: 'image_url', image_url: { url: dataUrl } }
@@ -2225,7 +2212,7 @@ const AgentToolsNative = {
       body: JSON.stringify({
         target_url: target,
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },   // 免费模型匿名可用，无需 key
+        headers: innerHeaders,
         stream: false,
         body: JSON.stringify(innerBody)
       })

@@ -13,6 +13,25 @@
 // OpenCode Zen API 基础地址
 const OPENCODE_BASE_URL = 'https://opencode.ai/zen/v1';
 
+// [FIX 2026-09-07] OpenCode Go 网关新要求：completion 请求必须携带 x-opencode-session
+// （粘性路由用；缺失直接 400 MissingSessionID，实测 2026-09-07 nemotron-3-ultra-free
+// 匿名调用全灭："Request is missing x-opencode-session and cannot be routed efficiently",
+// 见 https://opencode.ai/docs/go/#where-can-i-use-it ）。任意 UUID 均被接受（curl 实测）。
+// 取页面生命周期内稳定的随机 UUID —— crypto.randomUUID 优先，老环境回退时间+双随机拼串。
+let _ocSessionId = '';
+function _ocSessionUUID() {
+  if (_ocSessionId) return _ocSessionId;
+  try {
+    if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+      _ocSessionId = crypto.randomUUID();
+      return _ocSessionId;
+    }
+  } catch(e) {}
+  _ocSessionId = 'oc-' + Date.now().toString(36) + '-' +
+    Math.random().toString(36).slice(2, 12) + '-' + Math.random().toString(36).slice(2, 12);
+  return _ocSessionId;
+}
+
 // 静态回退目录 — 仅在 /models 动态拉取失败时使用（离线兑底）
 // [2026-09-03] 按当日 GET /models 实测（66 个模型 / 8 个 free）同步：
 //   新增 muse-spark-1.3-contributor-free；动态拉取上线后此表仅在离线时兜底
@@ -125,7 +144,7 @@ async function fetchOpenCodeModels(force) {
       if (token) headers['Authorization'] = 'Bearer ' + token;
       const resp = await fetch('/api/v1/agent/llm-proxy', {
         method: 'POST', headers,
-        body: JSON.stringify({ target_url: OPENCODE_BASE_URL + '/models', method: 'GET', headers: {}, stream: false })
+        body: JSON.stringify({ target_url: OPENCODE_BASE_URL + '/models', method: 'GET', headers: { 'x-opencode-session': _ocSessionUUID() }, stream: false })
       });
       if (!resp.ok) throw new Error('proxy HTTP ' + resp.status);
       const data = await resp.json();
@@ -258,6 +277,8 @@ function collectOpenCodeConfig(prefix) {
 async function testOpenCodeConnection(llmConfig) {
   const isResponses = (llmConfig.api_type === 'response');
   const headers = { 'Content-Type': 'application/json' };
+  // [FIX 2026-09-07] OpenCode Go 网关必需的会话路由头（缺失 → 400 MissingSessionID）
+  headers['x-opencode-session'] = _ocSessionUUID();
   // 匿名免费：没有 key 就不带 Authorization 头
   if (llmConfig.api_key) headers['Authorization'] = 'Bearer ' + llmConfig.api_key;
 
@@ -356,6 +377,8 @@ function _opencodeErrorHint(status, bodyText) {
   if (errType === 'FreeUsageLimitError') hint = ' — free tier rate limit; retry later, switch to another free model, or set a Zen API key';
   else if (errType === 'RegionError') hint = ' — this model is not available in your region; switch models';
   else if (errType === 'AuthError') hint = ' — this model requires an API key (paid), or the key is invalid';
+  else if (errType === 'MissingSessionID') hint = ' — this client build does not send the x-opencode-session header yet; upgrade aicqwebbot to 0.4.7+';
+  // 注意：MissingSessionID 不归入 upstreamDown（换模型无效 —— 该网关所有模型都要这个头）
   else if (upstreamDown) hint = ' — upstream model temporarily unavailable (OpenCode reports the upstream failure as HTTP ' + status + '): retry later or switch free models in the LLM settings';
   else if (status === 502) hint = ' — relay cannot reach opencode.ai (network/DNS/TLS)';
   else if (status === 404) hint = ' — endpoint not found; check the API type';
@@ -393,6 +416,7 @@ export default {
   collectOpenCodeConfig, testOpenCodeConnection,
   fetchOpenCodeModels,
   _ocAllModels, _ocApiTypeForModel,
+  _ocSessionUUID,            // [FIX 2026-09-07] x-opencode-session 路由头（页面级稳定 UUID）
   _isOpenCodeUpstreamError,  // [FIX 2026-09-05] 上游故障（假 400/5xx）识别
   _responsesOutputText, _opencodeErrorHint
 };

@@ -1931,6 +1931,34 @@ const AgentToolsNative = {
     await AgentStorage.saveFile(ctx.agentId, '/' + filename, buf);
   },
 
+  // [ADD 2026-09-07 v0.4.8] 独立壳文件投递通道 — aicq.me 全量前端靠 _autoSendFile 发出的
+  // message 帧渲染文件卡（chat-messaging.js msgType==='file' 分支 + HTML「预览」按钮），
+  // 但独立壳（pip 本地 / HF / MS 静态壳）的 LocalBus 只处理 stream_chunk/stream_end，
+  // message 帧被静默丢弃 → 用户在聊天里看不到智能体产出的任何文件。
+  // 这里补发一条 chunkType='file' 的 stream_chunk，由 app.js UI.onChunk 渲染
+  // （图片内联 / HTML 预览卡 / 通用下载卡）。严格限定独立壳：ctx.ws === window.__localBus
+  // （app.js 注入的本地总线）；aicq.me 真实 WS 下不发送，避免污染服务端流缓冲与全量前端。
+  _emitFileChunk(ctx, filename, mime, dataURI, size) {
+    try {
+      if (!ctx || !ctx.ws || ctx.ws.readyState !== 1) return;
+      if (typeof window === 'undefined' || !window.__localBus || ctx.ws !== window.__localBus) return;
+      ctx.ws.send(JSON.stringify({
+        type: 'stream_chunk',
+        to: ctx.replyTarget || ctx.sessionId,
+        from: ctx.agentId,
+        stream_id: 'file_' + Date.now(),
+        chunkType: 'file',
+        chat_session_id: (String(ctx.sessionId || '').startsWith('cs_')) ? ctx.sessionId : '',
+        data: {
+          filename: String(filename || 'file'),
+          mime: mime || 'application/octet-stream',
+          size: size || 0,
+          data: dataURI,
+        },
+      }));
+    } catch (e) { console.warn('[emitFileChunk] failed:', e); }
+  },
+
   // [FIX] 自动通过 WS 把文件发送给 owner (sessionId)
   async _autoSendFile(ctx, filename, blob) {
     // [FIX] Guard against undefined filename — LLM sometimes omits filename
@@ -1995,6 +2023,9 @@ const AgentToolsNative = {
     } catch(e) {
       console.error('[autoSendFile] Failed:', e);
     }
+    // [ADD 2026-09-07 v0.4.8] 独立壳渲染通道（见 _emitFileChunk 注释）—
+    // 同一份 base64 复用，aicq.me 不受影响（独立壳判定在 _emitFileChunk 内部）
+    this._emitFileChunk(ctx, filename, mimeType, `data:${mimeType};base64,${base64}`, bytes.length);
   },
 
   // [FIX] 扩展 sheet 的 !ref 范围以包含新加的单元格

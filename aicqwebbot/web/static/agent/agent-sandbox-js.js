@@ -77,8 +77,22 @@ const AgentSandboxJS = {
       if (result !== undefined) output += String(result) + '\n';
 
       // 持久化文件系统变更
+      // [ADD 2026-09-07 v0.4.8] exec-js 写的 .html 自动投递预览到聊天（限独立壳，
+      // 见 agent-tools-native.js _emitFileChunk 注释）。每次执行 fsData 从空开始，
+      // 只有本次新写的文件会投递；单次最多 3 个防刷屏。二进制（Uint8Array）跳过。
+      let _htmlEmitted = 0;
       for (const [path, content] of Object.entries(fsData)) {
         await AgentStorage.saveFile(ctx.agentId, path, content);
+        if (_htmlEmitted < 3 && typeof content === 'string' && /\.html?$/i.test(path)) {
+          try {
+            const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js');
+            const bytes = new TextEncoder().encode(content);
+            let bin = '';
+            for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+            AgentToolsNative._emitFileChunk(ctx, path.split('/').pop(), 'text/html', `data:text/html;base64,${btoa(bin)}`, bytes.length);
+            _htmlEmitted++;
+          } catch (e) { console.warn('[exec-js] html preview emit failed:', e); }
+        }
       }
 
       return { success: true, output: output.slice(0, 8000) || 'Code executed (no output).' };

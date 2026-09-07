@@ -211,7 +211,34 @@ _pxur.urlopen = _px_urlopen
     }
     // 持久化文件系统
     if (result) {
+      // [ADD 2026-09-07 v0.4.8] 快照差分投递：执行前记录 .html 基线（path→size），
+      // 执行后把「新增或变化」的 HTML 投递到聊天（限独立壳，见 _emitFileChunk）。
+      // 不能无差别全发 —— _saveFS 每次执行都重存 /home 全部文件，会刷屏；且
+      // exec-code 是默认沙箱，模型"做个网页"最常走的就是这条路。
+      const before = new Map();
+      try {
+        for (const f of await AgentStorage.listFiles(ctx.agentId, '/')) {
+          if (/\.html?$/i.test(f.path || '')) before.set(f.path, f.size || 0);
+        }
+      } catch (e) { /* 基线拿不到就当空 —— 最多多发一次旧文件，可接受 */ }
       await this._saveFS(ctx.agentId);
+      try {
+        let emitted = 0;
+        for (const f of await AgentStorage.listFiles(ctx.agentId, '/')) {
+          if (emitted >= 3) break;
+          const p = f.path || '';
+          if (!/\.html?$/i.test(p)) continue;
+          if (before.has(p) && before.get(p) === (f.size || 0)) continue;
+          const rec = await AgentStorage.readFile(ctx.agentId, p);
+          if (!rec || !rec.content) continue;
+          const bytes = new Uint8Array(rec.content);
+          let bin = '';
+          for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+          const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js');
+          AgentToolsNative._emitFileChunk(ctx, p.split('/').pop(), 'text/html', `data:text/html;base64,${btoa(bin)}`, bytes.length);
+          emitted++;
+        }
+      } catch (e) { console.warn('[exec-code] html preview emit failed:', e); }
       return result;
     }
     return { success: false, error: 'execution did not produce a result', output };
@@ -247,10 +274,12 @@ _pxur.urlopen = _px_urlopen
         result
       `);
       for (const path of files.toJs()) {
-        const content = this._pyodide.runPython(`
-          with open('${path}', 'rb') as f:
-            f.read()
-        `);
+        // [FIX 2026-09-07 v0.4.8] 原 `with open(...): f.read()` 是语句不是表达式，
+        // runPython 对纯语句返回 undefined → content.toJs() 抛
+        // "Cannot read properties of undefined (reading 'toJs')" 且被 try/catch 吞掉 ——
+        // Python 沙箱写的文件其实从来没持久化成功过（VS 始终为空，刷新即丢）。
+        // 改为表达式形式 open(...).read()，runPython 正常返回 bytes。
+        const content = this._pyodide.runPython(`open(${JSON.stringify(path)}, 'rb').read()`);
         const bytes = new Uint8Array(content.toJs());
         await AgentStorage.saveFile(agentId, path, bytes.buffer, path.startsWith('/home/persistent'));
       }

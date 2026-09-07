@@ -1434,6 +1434,10 @@ const AgentEngine = {
     const streamEnabled = !!replyTarget && llmConfig.stream !== false && !_forceNonStream;
 
     const headers = { 'Content-Type': 'application/json' };
+    // [FIX 2026-09-07] OpenCode Go 网关必需：缺失 → 400 MissingSessionID
+    // （"Request is missing x-opencode-session and cannot be routed efficiently"）。
+    // 页面级稳定 UUID（见 agent-llm-providers.js _ocSessionUUID）。
+    headers['x-opencode-session'] = OC._ocSessionUUID();
     // 匿名免费：没有 Key 就不带 Authorization 头（发 "Bearer " 反而会 401）
     if (llmConfig.api_key) headers['Authorization'] = 'Bearer ' + llmConfig.api_key;
 

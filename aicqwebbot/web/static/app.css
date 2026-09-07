@@ -240,3 +240,36 @@ img.chat-img { max-width: 260px; border-radius: 10px; display: block; margin: 8p
 .hist-row .hist-meta code { background: var(--codebg); padding: 1px 5px; border-radius: 4px; font-size: 10.5px; }
 #btnHistory { font-family: inherit; }
 #btnHistory:hover { border-color: var(--accent); }
+
+/* ═══════════ [2026-09-07 v0.4.8] 智能体文件投递卡 ═══════════
+   agent-tools-native.js _emitFileChunk 发出的 chunkType='file' 由 UI.fileCard 渲染：
+   图片内联 / HTML 渲染预览（iframe sandbox + 渲染·源码切换 + 新窗口 + 下载）/ 通用下载卡 */
+.file-msg { display: block; }
+.file-msg .fc-head { display: flex; align-items: center; gap: 8px; }
+.file-msg .fc-head .fc-icon { font-size: 16px; }
+.file-msg .fc-head .fc-name { font-weight: 600; font-size: 13.5px; word-break: break-all; }
+.file-msg .fc-head .fc-size { color: var(--muted); font-size: 12px; white-space: nowrap; }
+.file-msg .fc-head .fc-actions { margin-left: auto; display: flex; gap: 6px; flex-shrink: 0; }
+.file-msg .fc-head .fc-actions button {
+  border: 1px solid var(--border); background: var(--card); color: var(--muted);
+  border-radius: 6px; padding: 2px 9px; font-size: 12px; cursor: pointer; white-space: nowrap;
+}
+.file-msg .fc-head .fc-actions button:hover { border-color: var(--accent); color: var(--accent); }
+.file-msg .fc-head .fc-actions button.on { border-color: var(--accent); color: var(--accent); font-weight: bold; }
+.file-msg .fc-frame {
+  width: 100%; height: 380px; border: 1px solid var(--border); border-radius: 8px;
+  background: #fff; margin-top: 8px;
+}
+.file-msg .fc-src {
+  display: block; background: var(--codebg); border: 1px solid var(--border); border-radius: 8px;
+  padding: 10px; margin-top: 8px; overflow: auto; max-height: 380px;
+  font-size: 12.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-all;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace; color: var(--text);
+}
+.file-msg .fc-src.hidden { display: none; }
+.file-msg .fc-hint { color: var(--muted); font-size: 12.5px; margin-top: 4px; }
+.hist-file-chip {
+  align-self: flex-start; border: 1px dashed var(--border); background: var(--card);
+  color: var(--text); border-radius: 8px; padding: 4px 10px; font-size: 12.5px; cursor: pointer;
+}
+.hist-file-chip:hover { border-color: var(--accent); color: var(--accent); }

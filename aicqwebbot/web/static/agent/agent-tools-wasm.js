@@ -34,6 +34,21 @@ const AgentToolsWasm = {
   async write_file(args, ctx) {
     const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
     await AgentStorage.saveFile(ctx.agentId, args.path, args.content);
+    // [ADD 2026-09-07 v0.4.8] HTML 产物自动投递到聊天（独立壳）：用户让智能体"做个网页/
+    // 可视化页面"时，写完 .html 聊天里应立刻出现渲染预览卡 —— aicq.me 全量前端本就有
+    // 此效果（file-card + 预览按钮），独立壳此前什么都不显示，用户必须自己去文件管理器翻。
+    // 仅投递 .html/.htm 交付物；.py/.csv/.json 等中间产物留在文件管理器，避免刷屏。
+    if (/\.html?$/i.test(String(args.path || ''))) {
+      try {
+        const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js');
+        const text = String(args.content ?? '');
+        const bytes = new TextEncoder().encode(text);
+        let bin = '';
+        for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+        const fname = String(args.path).split('/').pop();
+        AgentToolsNative._emitFileChunk(ctx, fname, 'text/html', `data:text/html;base64,${btoa(bin)}`, bytes.length);
+      } catch (e) { console.warn('[write-file] html preview emit failed:', e); }
+    }
     return { success: true, output: `File written: ${args.path} (${args.content.length} bytes)` };
   },
 

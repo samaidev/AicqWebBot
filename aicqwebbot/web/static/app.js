@@ -187,7 +187,13 @@
     ag_fs_hide: 'Hide',
     ag_fs_copy: 'Copy',
     ag_fs_llm_cfg: 'LLM Config',
-    ag_fs_copied: 'Copied'
+    ag_fs_copied: 'Copied',
+    ag_file_rendered: 'Rendered',
+    ag_file_source: 'Source',
+    ag_file_newtab: 'New tab',
+    ag_file_download_tip: 'Download to your device',
+    ag_file_html_hint: 'Agent-created HTML — rendered preview below',
+    ag_file_trunc: 'Source too long — showing first 100k chars; use ⬇ or New tab for the full page'
   };
   window.t = (k) => AG_I18N[k] || k;
 
@@ -329,6 +335,14 @@
           img.className = 'chat-img'; img.src = url;
           st.body.appendChild(img);
         }
+      } else if (t === 'file' && d && typeof d === 'object' && d.data) {
+        // [ADD 2026-09-07 v0.4.8] 智能体投递的文件（独立壳通道，agent-tools-native.js
+        // _emitFileChunk 发出）：图片内联 / HTML 渲染预览卡 / 通用下载卡。
+        // 不登记进 replyNodes —— stream_end 的权威重放只重建 text/tool 节点，
+        // 登记了反而会把文件卡拆掉。
+        st.status.classList.add('hidden');
+        this.currentStream = null;   // 文件卡独立成块，下段文本另起气泡
+        $('msgFlow').appendChild(this.fileCard(d));
       }
       this.scroll();
     },
@@ -384,6 +398,108 @@
       this.replyNodes = []; this.replyTools.clear();
       this.currentStream = null;
       this.scroll();
+    },
+
+    // [ADD 2026-09-07 v0.4.8] 文件卡：图片内联；HTML 渲染预览（iframe sandbox +
+    // 渲染/源码切换 + 新窗口 + 下载，对应 aicq.me 全量前端的 file-card + 预览按钮）；
+    // 其它文件提供下载。d = { filename, mime, size, data(dataURI) }。
+    fileCard(d) {
+      const name = String(d.filename || 'file');
+      const ext = (name.split('.').pop() || '').toLowerCase();
+      const uri = String(d.data || '');
+      const size = Number(d.size) || 0;
+      const sizeStr = size ? (size < 1024 ? size + ' B' : size < 1048576 ? (size / 1024).toFixed(1) + ' KB' : (size / 1048576).toFixed(1) + ' MB') : '';
+      const isImg = !/html/.test(String(d.mime || '')) &&
+        (/^image\//.test(String(d.mime || '')) || ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext));
+      const isHtml = ext === 'html' || ext === 'htm' || /^text\/html/.test(String(d.mime || ''));
+
+      const el = document.createElement('div');
+      el.className = 'msg agent file-msg';
+
+      // 图片：直接内联（点击=下载）
+      if (isImg && !isHtml) {
+        const img = document.createElement('img');
+        img.className = 'chat-img'; img.src = uri; img.alt = name;
+        img.title = name + (sizeStr ? ' · ' + sizeStr : '');
+        img.onclick = () => UI.downloadURI(name, uri);
+        el.appendChild(img);
+        return el;
+      }
+
+      // HTML 源码（UTF-8 安全解码）
+      let htmlText = '';
+      if (isHtml) {
+        try { htmlText = decodeURIComponent(escape(atob(uri.split(',')[1] || ''))); }
+        catch (e) { htmlText = ''; }
+      }
+
+      const head = document.createElement('div');
+      head.className = 'fc-head';
+      head.innerHTML =
+        `<span class="fc-icon">${isHtml ? '🌐' : '📄'}</span>` +
+        `<span class="fc-name">${this.esc(name)}</span>` +
+        (sizeStr ? `<span class="fc-size">${sizeStr}</span>` : '') +
+        `<span class="fc-actions">` +
+        (isHtml
+          ? `<button data-act="render" class="on">🖥 ${t('ag_file_rendered')}</button>` +
+            `<button data-act="source">📝 ${t('ag_file_source')}</button>` +
+            `<button data-act="tab">↗ ${t('ag_file_newtab')}</button>`
+          : '') +
+        `<button data-act="download" title="${t('ag_file_download_tip')}">⬇</button>` +
+        `</span>`;
+      el.appendChild(head);
+
+      let frame = null, pre = null;
+      if (isHtml && htmlText) {
+        frame = document.createElement('iframe');
+        frame.className = 'fc-frame';
+        frame.setAttribute('sandbox', 'allow-scripts allow-forms allow-popups allow-modals');
+        el.appendChild(frame);
+        pre = document.createElement('pre');
+        pre.className = 'fc-src hidden';
+        const CAP = 100000;
+        pre.textContent = htmlText.slice(0, CAP) + (htmlText.length > CAP ? '\n… ' + t('ag_file_trunc') : '');
+        el.appendChild(pre);
+        // srcdoc 用 DOM 属性赋值，规避转义问题（同 agent-files.js 的做法）
+        frame.srcdoc = htmlText;
+      } else {
+        const hint = document.createElement('div');
+        hint.className = 'fc-hint';
+        hint.textContent = name + (sizeStr ? ' · ' + sizeStr : '');
+        el.appendChild(hint);
+      }
+
+      head.addEventListener('click', (e) => {
+        const btn = e.target && e.target.closest ? e.target.closest('button') : null;
+        const act = (btn && btn.dataset) ? btn.dataset.act : null;
+        if (!act) return;
+        if (act === 'download') { UI.downloadURI(name, uri); return; }
+        if (act === 'tab') {
+          const u = URL.createObjectURL(new Blob([htmlText], { type: 'text/html' }));
+          window.open(u, '_blank');
+          setTimeout(() => URL.revokeObjectURL(u), 120000);
+          return;
+        }
+        if (!frame) return;
+        if (act === 'render') {
+          frame.style.display = ''; pre.classList.add('hidden');
+          head.querySelectorAll('.fc-actions button').forEach(b => b.classList.toggle('on', b.dataset.act === 'render'));
+        } else if (act === 'source') {
+          frame.style.display = 'none'; pre.classList.remove('hidden');
+          head.querySelectorAll('.fc-actions button').forEach(b => b.classList.toggle('on', b.dataset.act === 'source'));
+        }
+      });
+      return el;
+    },
+
+    downloadURI(filename, uri) {
+      const a = document.createElement('a');
+      a.href = uri;
+      a.download = filename || 'file';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      toast('Downloaded: ' + (filename || ''), 'success');
     },
 
     scroll() {
@@ -826,6 +942,28 @@
             const card = Tools.card({ name: tc.function?.name || 'tool', input: args, id: tc.id || '' });
             $('msgFlow').appendChild(card.el);
             pending[tc.id || ''] = card;
+            // [ADD 2026-09-07 v0.4.8] 历史回放附件 chip —— 工具产出过文件（write-file 的
+            // path / create-* 的 filename）时补一个「打开预览」入口，内容从虚拟 FS 懒加载，
+            // 不往会话库里塞 base64。文件本身一直在文件管理器里，chip 只是快捷方式。
+            const _fp = String(args.path || args.filename || args.dest_path || '');
+            const _ext = (_fp.split('.').pop() || '').toLowerCase();
+            if (_fp && ['html', 'htm', 'png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'pdf', 'docx', 'xlsx', 'pptx', 'csv', 'md', 'txt', 'json'].includes(_ext)) {
+              const chip = document.createElement('button');
+              chip.className = 'hist-file-chip';
+              chip.textContent = '📎 ' + _fp.split('/').pop();
+              chip.title = _fp;
+              chip.onclick = async () => {
+                if (!document.getElementById('agent-styles')) {
+                  const link = document.createElement('link');
+                  link.id = 'agent-styles'; link.rel = 'stylesheet';
+                  link.href = '/static/agent/agent-styles.css';
+                  document.head.appendChild(link);
+                }
+                if (!window.openFileViewer) await import(_agUrl('agent-files.js'));
+                window.openFileViewer(currentAgentId, _fp.startsWith('/') ? _fp : '/' + _fp);
+              };
+              $('msgFlow').appendChild(chip);
+            }
           }
         }
       } else if (m.role === 'tool') {
@@ -904,6 +1042,10 @@
   }
 
   async function shimProxy(url, init) {
+    // [FIX 2026-09-07] 非 string url（Request/URL 对象 —— Pyodide/Emscripten
+    // 内部加载 wasm/包时就是这么调的）直接透传，绝不碰 .includes：
+    // 此前 "url.includes is not a function" 直接炸掉 Pyodide 的 wasm 实例化。
+    if (typeof url !== 'string') return RealFetch(url, init);
     if (url.includes('/api/v1/agent/llm-proxy')) {
       let p;
       try { p = JSON.parse(init && init.body || '{}'); }

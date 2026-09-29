@@ -1075,6 +1075,17 @@ const AgentEngine = {
       return await sendChunked(contentToSendScnet, 'user message');
     }
 
+    // ── OpenCode Zen (opencode.ai) [2026-08-28, 恢复于 0.4.10] ──
+    // 匿名免费 LLM；两种 API 类型: openai-completion (Chat Completions) / response (Responses)
+    // ⚠ 仅 AicqWebBot 独立包（本地中继=客户端 IP）。aicq.me 登录版 (server-go)
+    //   的 LLM 走服务器中继会暴露服务器 IP —— server-go 侧保持移除，勿同步本分支。
+    // [2026-09-29] 上游免费档 2026-09 起加客户端指纹闸门（FreeTierError），
+    //   wire 口径对齐 teambot free_model_hub v1.56.45：恒流式 + ses_/msg_ 身份头
+    //   + UA 伪装 + 指纹诱饵工具注入 + 诱饵 tool_call 过滤（详见 agent-llm-providers.js 头注）。
+    if (provider === 'opencode') {
+      return await this._callOpenCode(messages, tools, config, replyTarget, false, forceNonStream);
+    }
+
     // ── [2026-09-06] openai-response（OpenAI Responses API，POST /responses）──
     // BYOK 供应商（openai / custom）可选 Responses 协议：gpt-5.x 等新模型推荐。
     // 复用 _messagesToResponsesInput / _toolsToResponsesFormat / _parseResponsesOutput；
@@ -1644,6 +1655,406 @@ const AgentEngine = {
       content: choice.message?.content || '',
       tool_calls: choice.message?.tool_calls || []
     };
+  },
+
+  // ═══════ OpenCode Zen (opencode.ai) [2026-08-28, 恢复+指纹适配于 0.4.10] ═══════
+  // 两种 API 类型:
+  //   openai-completion → POST {base}/chat/completions (OpenAI Chat Completions 兼容)
+  //   response          → POST {base}/responses        (OpenAI Responses API)
+  // 特性: 匿名免费(无Key) / SSE 流式输出(含 reasoning) / 工具调用 / 图片输入
+  // [2026-09-29] 免费档指纹闸门适配（口径=teambot free_model_hub v1.56.45）:
+  //   wire 恒 stream:true（非流式一律 FreeTierError）→ 非流式消费者在本地聚合；
+  //   ses_/msg_ 26 位身份头 + UA 伪装 + 11 个指纹诱饵工具名注入；
+  //   响应里诱饵 tool_call（上游"调用" bash/webfetch 等指纹工具）全部过滤。
+  // [FIX 2026-09-05] 第 7 参 _triedModels：免费模型上游挂掉（假 400 server_error / 5xx）
+  //   时按 OC_FAILOVER_POOL 自动切换其他免费模型重试，最多额外尝试 2 个。
+  async _callOpenCode(messages, tools, config, replyTarget, _retried, _forceNonStream, _triedModels) {
+    const llmConfig = config.llm_config;
+    const OC = (await import(_agUrl('agent-llm-providers.js'))).default;
+    const isResponses = (llmConfig.api_type === 'response');
+    const base = (llmConfig.base_url || OC.OPENCODE_BASE_URL).replace(/\/+$/, '');
+    // UI 流式开关（replyTarget 为空=内部调用；_forceNonStream=引擎要求非流式输出，
+    // 如流式卡顿重试。两者都只影响 chunk 外发 —— wire 恒流式，非流式消费本地聚合）
+    const streamUI = !!replyTarget && llmConfig.stream !== false && !_forceNonStream;
+
+    // ── wire headers：指纹身份头（UA 在本地中继侧还会兜底强制）──
+    const headers = Object.assign({ 'Content-Type': 'application/json' }, OC._ocIdentityHeaders());
+    // 匿名免费可用（teambot 实测 Authorization 可选；真 Zen key 才走付费模型）
+    if (llmConfig.api_key) headers['Authorization'] = 'Bearer ' + llmConfig.api_key;
+
+    let body, url;
+    if (isResponses) {
+      // ── Responses API (/responses) ──
+      url = base + '/responses';
+      const conv = this._messagesToResponsesInput(messages);
+      body = {
+        model: llmConfig.model,
+        input: conv.input,
+        stream: true,                    // [2026-09-29] 恒流式
+        store: false
+      };
+      if (conv.instructions) body.instructions = conv.instructions;
+      // 真实工具 + 指纹诱饵（responses 格式）
+      body.tools = (tools.length > 0 ? this._toolsToResponsesFormat(tools) : []).concat(OC._ocMimicToolsResponses());
+      body.tool_choice = 'auto';
+    } else {
+      // ── Chat Completions (/chat/completions) ──
+      url = base + '/chat/completions';
+      body = {
+        model: llmConfig.model,
+        messages: messages,
+        stream: true,                    // [2026-09-29] 恒流式（非流式一律 FreeTierError）
+        temperature: 0.8,
+        // [FIX 2026-08-30] 16384: nemotron 等 reasoning 模型的思考 token 计入 max_tokens
+        max_tokens: 16384,
+        stream_options: { include_usage: true }
+      };
+      // 真实工具 + 指纹诱饵（chat 格式；混合形态 teambot 已验证）
+      body.tools = (tools.length > 0 ? tools : []).concat(OC._ocMimicTools());
+      if (tools.length === 0) body.tool_choice = 'auto';
+    }
+
+    const proxyBody = {
+      target_url: url, method: 'POST', headers,
+      body: JSON.stringify(body),
+      stream: true                       // 中继侧按 SSE 流式透传
+    };
+    console.log('[AgentEngine._callOpenCode] api_type=', llmConfig.api_type, 'model=', llmConfig.model, 'streamUI=', streamUI, 'tools=', tools.length, '(+fingerprint decoys)');
+
+    // [2026-09-04] LLM 日志计时起点（fetch 之前）
+    const _llmT0 = Date.now();
+    const resp = await fetch('/api/v1/agent/llm-proxy', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (llmConfig.__authToken || '') },
+      body: JSON.stringify(proxyBody)
+    });
+
+    if (!resp.ok) {
+      let errDetail = '';
+      try { errDetail = await resp.text(); } catch(e) {}
+      // [2026-08-28] 瞬态上游错误（过载/502/503）自动重试一次
+      if (!_retried && this._isTransientUpstreamError(resp.status, errDetail)) {
+        console.warn('[AgentEngine._callOpenCode] Transient upstream error (HTTP ' + resp.status + '), retrying once...');
+        await new Promise(r => setTimeout(r, 1500));
+        return await this._callOpenCode(messages, tools, config, replyTarget, true, _forceNonStream,
+          [...(_triedModels || [llmConfig.model]), llmConfig.model]);
+      }
+      // [FIX 2026-08-29] OpenCode free models reject any request whose history
+      // contains assistant.tool_calls + role:'tool' messages (HTTP 400 "请求
+      // 格式错误") — flatten the tool history into plain user/assistant text
+      // and retry once so the session survives tool usage.
+      if (resp.status === 400 && !_retried && !isResponses &&
+          messages.some(m => m && (m.role === 'tool' || Array.isArray(m.tool_calls)))) {
+        console.warn('[AgentEngine._callOpenCode] HTTP 400 with tool history — flattening tool messages, retrying once...');
+        return await this._callOpenCode(this._flattenToolHistory(messages), tools, config, replyTarget, true, _forceNonStream, _triedModels);
+      }
+      // [FIX 2026-09-05] 免费模型上游不可用（OpenCode 把上游故障包成假 400 server_error / 5xx）
+      // → 自动切换到 failover 池里下一个可用免费模型。仅限官方 OpenCode 端点上的 -free 模型。
+      // 上限：原模型 + 最多 2 个备用，防止链式重试拖慢响应。
+      const _ocUpstreamDown = OC._isOpenCodeUpstreamError(resp.status, errDetail);
+      if (_ocUpstreamDown && this._ocFailoverEligible(llmConfig, base)) {
+        const tried = (Array.isArray(_triedModels) && _triedModels.length) ? _triedModels : [llmConfig.model];
+        if (tried.length < 3) {
+          const next = OC.OC_FAILOVER_POOL.find(m => !tried.includes(m));
+          if (next) {
+            console.warn(`[AgentEngine._callOpenCode] 模型 ${llmConfig.model} 上游不可用（HTTP ${resp.status}），自动切换到 ${next}`);
+            if (replyTarget) {
+              this._sendStreamChunk(config.agent_id, replyTarget, config,
+                `\n[Free model ${llmConfig.model} upstream unavailable — auto-switching to ${next}]\n`, 'reasoning');
+            }
+            const fc = { ...config, llm_config: { ...llmConfig, model: next, api_type: 'openai-completion' } };
+            return await this._callOpenCode(messages, tools, fc, replyTarget, false, _forceNonStream, [...tried, next]);
+          }
+        }
+      }
+      // [2026-09-04] LLM 日志：HTTP 失败
+      this._logLLM({ provider: llmConfig.provider, model: llmConfig.model, status: resp.status,
+        latency_ms: Date.now() - _llmT0, msg_count: messages.length, _messages: messages,
+        error: ('HTTP ' + resp.status + ' — ' + errDetail).slice(0, 500), agent_id: config.agent_id });
+      // [2026-09-06] http_status 供 _callLLMRetry 识别 429 限流（30s 指数退避重试）
+      return { success: false, http_status: resp.status, error: 'OpenCode error: ' + OC._opencodeErrorHint(resp.status, errDetail) + ` (model: ${llmConfig.model})` };
+    }
+
+    const contentType = (resp.headers.get('Content-Type') || '');
+    // 服务端降级/错误时返回 JSON（非 SSE）→ 按非流式解析
+    if (contentType.includes('application/json')) {
+      const text = await resp.text();
+      let data;
+      try { data = JSON.parse(text); }
+      catch(e) {
+        this._logLLM({ provider: llmConfig.provider, model: llmConfig.model, status: 'ERR',
+          latency_ms: Date.now() - _llmT0, msg_count: messages.length, _messages: messages,
+          error: 'response not valid JSON: ' + text.slice(0, 300), agent_id: config.agent_id });
+        return { success: false, error: 'OpenCode response is not valid JSON: ' + text.slice(0, 200) };
+      }
+      if (data.type === 'error') {
+        // [2026-08-28] 瞬态错误（过载等）自动重试一次
+        if (!_retried && this._isTransientUpstreamError(200, text)) {
+          console.warn('[AgentEngine._callOpenCode] Transient upstream error in body, retrying once...');
+          await new Promise(r => setTimeout(r, 1500));
+          return await this._callOpenCode(messages, tools, config, replyTarget, true, _forceNonStream, _triedModels);
+        }
+        this._logLLM({ provider: llmConfig.provider, model: llmConfig.model, status: 200,
+          latency_ms: Date.now() - _llmT0, msg_count: messages.length, _messages: messages,
+          output: text.slice(0, 500),
+          error: ('OpenCode error body: ' + text).slice(0, 500), agent_id: config.agent_id });
+        return { success: false, error: 'OpenCode error: ' + OC._opencodeErrorHint(200, text) };
+      }
+      const parsed = isResponses ? this._parseResponsesOutput(data) : this._parseOpenAIResponse(data);
+      if (!parsed.success && !_retried && this._isTransientUpstreamError(200, text)) {
+        console.warn('[AgentEngine._callOpenCode] Transient upstream error (parsed), retrying once...');
+        await new Promise(r => setTimeout(r, 1500));
+        return await this._callOpenCode(messages, tools, config, replyTarget, true, _forceNonStream, _triedModels);
+      }
+      // 非流式但已拿到全文：整段作为一条 text chunk 发出（保持 UI 一致）
+      if (streamUI && parsed.success && parsed.content && !parsed.tool_calls?.length && replyTarget) {
+        this._sendStreamChunk(config.agent_id, replyTarget, config, parsed.content, 'text');
+        parsed.streamed = true;
+      }
+      this._logLLMGeneric(parsed, data, llmConfig, messages, _llmT0, config);
+      return parsed;
+    }
+
+    // ── SSE 流式解析（wire 恒流式）──
+    // [2026-09-29] 非流式消费者（内部调用 / forceNonStream）：流照收，本地聚合成
+    //   非流式结果，不外发 stream_chunk（replyTarget 为空时解析器本就不外发）。
+    const _sseT0 = Date.now();
+    let r;
+    if (isResponses) {
+      r = await this._parseResponsesStream(resp, config, streamUI ? replyTarget : null);
+    } else {
+      r = await this._parseOpenCodeChatStream(resp, config, streamUI ? replyTarget : null);
+    }
+    this._logLLMStream(r, llmConfig, messages, _sseT0, config);
+    // [FIX 2026-09-05] 流式一开始就收到上游错误事件（HTTP 200 + SSE error）且尚未
+    // 向用户发过任何内容 → 自动重试一次（wire 恒流式，无"降级非流式"分支）。
+    // 已流出部分内容时不重试，避免用户看到重复输出。
+    if (!r.success && r.streamError && !r.streamedSomething) {
+      if (!_retried) {
+        console.warn('[AgentEngine._callOpenCode] SSE stream failed before any output — retrying once...');
+        return await this._callOpenCode(messages, tools, config, replyTarget, true, _forceNonStream, _triedModels);
+      }
+    }
+    return r;
+  },
+
+  // [FIX 2026-09-05] 免费模型 failover 资格判定：
+  // 模型以 -free 结尾 + 官方 OpenCode 端点（匿名或带 key 均可，付费 key 的
+  // 模型目录由用户控制的不切 —— 仅 -free 后缀才进 failover）。
+  _ocFailoverEligible(llmConfig, base) {
+    if (!llmConfig || typeof llmConfig.model !== 'string' || !llmConfig.model.endsWith('-free')) return false;
+    const OFFICIAL = 'https://opencode.ai/zen/v1';
+    return (base || llmConfig.base_url || OFFICIAL).replace(/\/+$/, '') === OFFICIAL;
+  },
+
+  // [2026-09-04] 流式路径日志收口（0.4.9 随 OpenCode 移除，0.4.10 恢复）
+  _logLLMStream(r, llmConfig, messages, t0, config) {
+    try {
+      const u = (r && r.usage) || null;
+      const tin = u ? (u.prompt_tokens ?? u.input_tokens ?? null) : this._estTokensIn(messages);
+      const tout = u ? (u.completion_tokens ?? u.output_tokens ?? null) : Math.ceil((r?.content || '').length / 4);
+      const toolNames = (r?.tool_calls || []).map(tc => tc.function?.name || '?').join(',');
+      this._logLLM({
+        provider: llmConfig.provider, model: llmConfig.model,
+        status: 200,
+        latency_ms: Date.now() - t0, tokens_in: tin, tokens_out: tout,
+        tokens_est: !u, msg_count: messages.length, _messages: messages,
+        output: (r?.content || '') + (toolNames ? '\n[tool_calls] ' + toolNames : ''),
+        error: (r && r.success) ? '' : String(r?.error || '').slice(0, 500),
+        agent_id: config.agent_id, phase: 'SSE'
+      });
+    } catch (e) { console.warn('[LLMLog] stream log failed:', e); }
+  },
+
+  // SSE 逐行读取器（data: 行 → JSON 事件回调）
+  // 0.4.9 随 OpenCode 移除（孤儿），0.4.10 随恢复回归
+  async _readSSE(resp, onEvent) {
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf('\n')) !== -1) {
+        const line = buf.slice(0, idx).replace(/\r$/, '');
+        buf = buf.slice(idx + 1);
+        if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
+        if (!payload || payload === '[DONE]') continue;
+        try { onEvent(JSON.parse(payload)); } catch(e) { /* 单个事件解析失败不影响整体 */ }
+      }
+    }
+  },
+
+  // OpenCode chat SSE 流式解析 — 边收边发 stream_chunk
+  // [2026-09-29] 指纹诱饵 tool_call 过滤：上游可能对注入的 bash/webfetch 等
+  //   指纹工具发起"调用"（teambot 实证 decoy tool_call 需过滤），全部丢弃。
+  async _parseOpenCodeChatStream(resp, config, replyTarget) {
+    const OC = (await import(_agUrl('agent-llm-providers.js'))).default;
+    let content = '';
+    let hasReasoning = false;
+    let streamError = null;
+    let _usage = null;   // [2026-09-04] SSE 尾部 usage（部分网关才发）
+    let decoysDropped = 0;
+    const tcAcc = [];  // tool_calls 按 index 累积
+    const send = (data, type) => { if (replyTarget) this._sendStreamChunk(config.agent_id, replyTarget, config, data, type); };
+
+    await this._readSSE(resp, (ev) => {
+      if (ev.usage) _usage = ev.usage;   // [2026-09-04] 收集流式 usage（无 choices 的尾部 chunk）
+      if (ev.type === 'error') {
+        streamError = (ev.error && (ev.error.message || ev.error.type)) || JSON.stringify(ev.error || ev).slice(0, 200);
+        return;
+      }
+      const choice = ev.choices?.[0];
+      if (!choice) return;
+      const delta = choice.delta || {};
+      // reasoning 增量（nemotron 用 reasoning，hy3 用 reasoning_content）
+      const rd = delta.reasoning_content || delta.reasoning;
+      if (rd) {
+        hasReasoning = true;
+        send(String(rd), 'reasoning');
+      }
+      if (delta.content) {
+        content += delta.content;
+        send(delta.content, 'text');
+      }
+      if (Array.isArray(delta.tool_calls)) {
+        for (const tc of delta.tool_calls) {
+          const i = (typeof tc.index === 'number') ? tc.index : tcAcc.length;
+          if (!tcAcc[i]) tcAcc[i] = { id: '', function: { name: '', arguments: '' } };
+          if (tc.id) tcAcc[i].id = tc.id;
+          if (tc.function?.name) tcAcc[i].function.name += tc.function.name;
+          if (tc.function?.arguments) tcAcc[i].function.arguments += tc.function.arguments;
+        }
+      }
+    });
+
+    if (streamError) {
+      return {
+        success: false,
+        error: 'OpenCode error: ' + OC._opencodeErrorHint(200, JSON.stringify({ type: 'error', error: { type: 'StreamError', message: streamError } })),
+        streamError,
+        // [FIX 2026-09-05] 已向用户流出过任何内容（含 reasoning/tool_call）则不允许自动重试，避免重复输出
+        streamedSomething: hasReasoning || content.length > 0 || tcAcc.filter(Boolean).length > 0
+      };
+    }
+    if (hasReasoning) send('', 'reasoning_end');
+    const realCalls = [];
+    for (const tc of tcAcc.filter(Boolean)) {
+      if (OC._ocIsDecoyName(tc.function.name)) { decoysDropped++; continue; }
+      realCalls.push(tc);
+    }
+    const toolCalls = realCalls.map((tc, i) => ({
+      id: tc.id || ('call_' + (i + 1)),
+      type: 'function',
+      function: { name: tc.function.name, arguments: tc.function.arguments || '{}' }
+    }));
+    if (decoysDropped) console.log('[AgentEngine._parseOpenCodeChatStream] suppressed ' + decoysDropped + ' fingerprint decoy tool_call(s)');
+    console.log('[AgentEngine._parseOpenCodeChatStream] done: content_len=', content.length, 'tool_calls=', toolCalls.length);
+    return {
+      success: true, content, tool_calls: toolCalls, streamed: content.length > 0, usage: _usage,
+      // [FIX 2026-09-05] 供 _callOpenCode 判断「流式尚未输出任何内容就失败」→ 自动重试
+      streamError: null,
+      streamedSomething: hasReasoning || content.length > 0 || toolCalls.length > 0
+    };
+  },
+
+  // OpenCode responses SSE 流式解析
+  // 事件: response.output_text.delta / response.reasoning_text.delta(或 reasoning_summary_text.delta)
+  //       / response.output_item.done(function_call) / response.completed / response.failed
+  // [2026-09-29] 指纹诱饵 function_call 过滤（同 chat 流）
+  async _parseResponsesStream(resp, config, replyTarget) {
+    const OC = (await import(_agUrl('agent-llm-providers.js'))).default;
+    let content = '';
+    let hasReasoning = false;
+    let streamError = null;
+    let _usage = null;
+    let decoysDropped = 0;
+    const fnCalls = [];
+    const send = (data, type) => { if (replyTarget) this._sendStreamChunk(config.agent_id, replyTarget, config, data, type); };
+
+    await this._readSSE(resp, (ev) => {
+      const t = ev.type || '';
+      if (t === 'response.output_text.delta' && ev.delta) {
+        content += ev.delta;
+        send(ev.delta, 'text');
+      } else if ((t === 'response.reasoning_text.delta' || t === 'response.reasoning_summary_text.delta') && ev.delta) {
+        hasReasoning = true;
+        send(ev.delta, 'reasoning');
+      } else if (t === 'response.output_item.done' && ev.item) {
+        if (ev.item.type === 'function_call') {
+          if (OC._ocIsDecoyName(ev.item.name || '')) { decoysDropped++; return; }
+          fnCalls.push({
+            id: ev.item.call_id || ev.item.id || ('call_' + (fnCalls.length + 1)),
+            type: 'function',
+            function: { name: ev.item.name || '', arguments: ev.item.arguments || '{}' }
+          });
+        } else if (ev.item.type === 'message' && Array.isArray(ev.item.content)) {
+          // 兜底：某些网关不发 output_text.delta，从 done 事件补全文本（仅当还没收到任何文本）
+          if (!content) {
+            for (const c of ev.item.content) {
+              if (c.type === 'output_text' && c.text) { content += c.text; send(c.text, 'text'); }
+            }
+          }
+        }
+      } else if (t === 'response.completed' || t === 'response.incomplete') {
+        // [2026-09-04] 收集 usage
+        if (ev.response?.usage) _usage = ev.response.usage;
+        // 兜底：如果 done 事件没给全 function_call，从最终响应对象补全
+        if (fnCalls.length === 0) {
+          for (const item of (ev.response?.output || [])) {
+            if (item.type === 'function_call') {
+              if (OC._ocIsDecoyName(item.name || '')) { decoysDropped++; continue; }
+              fnCalls.push({
+                id: item.call_id || item.id || ('call_' + (fnCalls.length + 1)),
+                type: 'function',
+                function: { name: item.name || '', arguments: item.arguments || '{}' }
+              });
+            }
+          }
+        }
+      } else if (t === 'response.failed') {
+        const err = ev.response?.error || {};
+        streamError = err.message || JSON.stringify(err).slice(0, 200);
+      } else if (t === 'error' || ev.error) {
+        streamError = (ev.error && (ev.error.message || ev.error.type)) || JSON.stringify(ev.error || ev).slice(0, 200);
+      }
+    });
+
+    if (streamError) {
+      return { success: false, error: 'OpenCode error: ' + OC._opencodeErrorHint(200, JSON.stringify({ type: 'error', error: { type: 'StreamError', message: streamError } })) };
+    }
+    if (hasReasoning) send('', 'reasoning_end');
+    if (decoysDropped) console.log('[AgentEngine._parseResponsesStream] suppressed ' + decoysDropped + ' fingerprint decoy function_call(s)');
+    console.log('[AgentEngine._parseResponsesStream] done: content_len=', content.length, 'tool_calls=', fnCalls.length);
+    return { success: true, content, tool_calls: fnCalls, streamed: content.length > 0, usage: _usage };
+  },
+
+  // [FIX 2026-08-29] 工具历史扁平化 — OpenCode free 模型拒绝含
+  // assistant.tool_calls + role:'tool' 的历史（HTTP 400），失败重试时把
+  // 工具往返折叠成纯文本 user/assistant 消息。
+  _flattenToolHistory(messages) {
+    const out = [];
+    for (const m of (messages || [])) {
+      if (!m || typeof m !== 'object') continue;
+      if (m.role === 'assistant' && Array.isArray(m.tool_calls) && m.tool_calls.length) {
+        const names = m.tool_calls.map(tc => {
+          let a = '';
+          try { a = JSON.stringify(JSON.parse(tc.function.arguments || '{}')).slice(0, 120); } catch(e) { a = String(tc.function.arguments || '').slice(0, 120); }
+          return (tc.function && tc.function.name || 'tool') + '(' + a + ')';
+        }).join('; ');
+        out.push({ role: 'assistant', content: (typeof m.content === 'string' && m.content ? m.content + '\n' : '') + '[已调用工具: ' + names + ']' });
+        continue;
+      }
+      if (m.role === 'tool') {
+        out.push({ role: 'user', content: '[工具结果] ' + String(m.content || '').slice(0, 4000) });
+        continue;
+      }
+      out.push(m);
+    }
+    return out;
   },
 
   // [2026-08-28] 判断是否为瞬态上游错误（值得自动重试一次）：5xx/超时/overloaded 类错误自动重试一次

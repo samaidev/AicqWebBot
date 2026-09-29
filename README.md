@@ -53,6 +53,7 @@ The insight: **containers are scarce on servers, but the browser is a free, pre-
 The bundled agent runtime (a zero-modification build of the [aicq.me](https://aicq.me) web agent) ships with:
 
 - **50+ built-in tools** — web search, web read, HTTP client, file system (virtual FS), doc/xlsx/pdf/ppt creation, charts, image drawing, QR codes, email, clipboard, translate, weather, task planning, and more
+- **Free anonymous models** — no API key at all: OpenCode Zen free models (0.4.10+). Calls egress from **your machine** via the local relay — never from any server
 - **Code sandbox** — Python (Pyodide / numpy / pandas) or JavaScript (QuickJS), executing as WebAssembly inside your tab
 - **Context compression** — long conversations are automatically summarized so memory usage stays bounded
 - **Vision** — send images, the agent analyzes them with a vision model

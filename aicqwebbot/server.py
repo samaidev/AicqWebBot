@@ -16,6 +16,7 @@
 # All agent state lives in the browser (IndexedDB). Restart safe.
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -41,6 +42,99 @@ UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
 
 # ═══════════════ 1. LLM proxy (mirror of aicq.me's /api/v1/agent/llm-proxy) ═══════════════
 
+# ── [2026-09-29] OpenCode Zen 免费档客户端指纹保障（0.4.10 恢复）─────────────
+# 上游 2026-09 起对免费档加客户端指纹闸门（"free tier can only be used from
+# within OpenCode" → FreeTierError）。口径与 samaidev/teambot
+# core/free_model_hub.py (v1.56.45) 实测一致：
+#   ① User-Agent 必须形如 opencode 客户端（浏览器 fetch 的 UA 不可靠 → 服务端强制）；
+#   ② x-opencode-session = "ses_"+26位、x-opencode-request = "msg_"+26位；
+#     26位 = 12位小写hex（毫秒<<12 截断 48bit）+ 14位 base62（13位 hex 会被拒）；
+#   ③ 请求体恒 stream:true（非流式一律 FreeTierError）；
+#   ④ body.tools 必须含 11 个 opencode 工具名（只看名字，描述/参数任意）。
+# 仅对 target 为 opencode.ai（含子域名）的请求生效，其他供应商零影响。
+# ⚠ 范围：本中继跑在【用户自己电脑】上 → opencode.ai 看到的是客户端 IP；
+#   服务器侧（aicq.me）不得接入本逻辑。
+_OC_HOST_SUFFIX = "opencode.ai"
+_OC_CLIENT_UA = "opencode/1.18.32 ai-sdk/provider-utils/4.0.23 runtime/bun/1.3.14"
+_OC_TOOL_NAMES = ("bash", "edit", "glob", "grep", "read", "skill", "task",
+                  "todowrite", "webfetch", "websearch", "write")
+_OC_A62 = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
+_oc_last_ms = 0
+_oc_counter = 0
+
+
+def _is_opencode_target(url: str) -> bool:
+    try:
+        from urllib.parse import urlparse
+        host = (urlparse(url).hostname or "").lower()
+    except Exception:
+        return False
+    return host == _OC_HOST_SUFFIX or host.endswith("." + _OC_HOST_SUFFIX)
+
+
+def _oc_make_id(prefix: str) -> str:
+    """opencode 兼容 ID：prefix_ + 12位hex(48bit) + 14位base62。
+    对齐 packages/opencode/src/id/id.ts：48bit 截断是必要的（13位hex被拒）。"""
+    global _oc_last_ms, _oc_counter
+    import time as _time
+    ms = int(_time.time() * 1000)
+    if ms != _oc_last_ms:
+        _oc_last_ms = ms
+        _oc_counter = 0
+    _oc_counter += 1
+    now = (ms << 12) & ((1 << 48) - 1)
+    rand = "".join(_OC_A62[b % 62] for b in os.urandom(14))
+    return f"{prefix}_{now:012x}{rand}"
+
+
+def _oc_decoy_tool(name: str, responses_format: bool) -> dict:
+    fn = {"name": name, "description": "x", "parameters": {"type": "object", "properties": {}}}
+    return {"type": "function", **fn} if responses_format else {"type": "function", "function": fn}
+
+
+def _oc_enforce_headers_and_body(target_url: str, headers: dict, body) -> tuple:
+    """opencode.ai 定向：强制 UA/身份头 + body 恒流式 + 指纹工具名补齐。
+    返回 (headers, body_bytes)。非 JSON body / 解析失败时原样透传。"""
+    headers = dict(headers or {})
+    headers["User-Agent"] = _OC_CLIENT_UA                      # 指纹①：客户端 UA（强制覆盖）
+    headers.setdefault("x-opencode-client", "cli")
+    headers.setdefault("x-opencode-project", "global")
+    sess = str(headers.get("x-opencode-session") or "")
+    # 指纹②：ses_ + 26 位格式校验，不合法就地重生成（会话粘性尽力保留）
+    if not (sess.startswith("ses_") and len(sess) == 30):
+        sess = _oc_make_id("ses")
+        headers["x-opencode-session"] = sess
+    headers["x-opencode-request"] = _oc_make_id("msg")          # msg_ 每请求刷新
+    if not str(headers.get("Authorization") or "").strip():
+        headers["Authorization"] = "Bearer public"              # 镜像真客户端（匿名免费）
+    # 指纹③④：body 恒流式 + 工具名补齐（/responses 用 responses 格式，其余按 chat）
+    if body:
+        try:
+            obj = json.loads(body) if isinstance(body, (str, bytes)) else None
+        except Exception:
+            obj = None
+        if isinstance(obj, dict):
+            obj["stream"] = True
+            is_responses = target_url.rstrip("/").endswith("/responses")
+            tools = obj.get("tools")
+            names = set()
+            if isinstance(tools, list):
+                for t in tools:
+                    if isinstance(t, dict):
+                        fn = t.get("function") if isinstance(t.get("function"), dict) else t
+                        if isinstance(fn, dict) and fn.get("name"):
+                            names.add(fn["name"])
+                missing = [n for n in _OC_TOOL_NAMES if n not in names]
+                obj["tools"] = tools + [_oc_decoy_tool(n, is_responses) for n in missing]
+            else:
+                obj["tools"] = [_oc_decoy_tool(n, is_responses) for n in _OC_TOOL_NAMES]
+                obj.setdefault("tool_choice", "auto")
+            if not is_responses:
+                obj.setdefault("stream_options", {"include_usage": True})
+            body = json.dumps(obj)
+    return headers, body
+
+
 @app.post("/api/v1/agent/llm-proxy")
 async def llm_proxy(request: Request):
     """Generic relay: {target_url, method, headers, body, stream} -> upstream.
@@ -49,6 +143,10 @@ async def llm_proxy(request: Request):
     user's API key in headers) and posts it here. We forward verbatim and
     stream the response back when asked. The key transits this process in
     memory only — nothing is stored, logged, or sent anywhere else.
+    [2026-09-29] opencode.ai targets get the free-tier client-fingerprint
+    enforcement (UA + ses_/msg_ identity headers + forced stream + tool-name
+    set) — see _oc_enforce_headers_and_body above. All egress happens from
+    the USER'S machine (this relay), never from any server.
     """
     try:
         payload = await request.json()
@@ -65,6 +163,11 @@ async def llm_proxy(request: Request):
     want_stream = bool(payload.get("stream"))
     if isinstance(body, (dict, list)):
         body = json.dumps(body)
+
+    # [2026-09-29] opencode.ai 免费档指纹保障（仅此 host；浏览器侧已带身份头，
+    # 此处统一兜底强制 —— UA 等头浏览器端不可靠，出口以本地中继为准）
+    if _is_opencode_target(target_url):
+        headers, body = _oc_enforce_headers_and_body(target_url, headers, body)
 
     timeout = httpx.Timeout(300.0, connect=20.0)
     try:

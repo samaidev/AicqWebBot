@@ -3,8 +3,9 @@
    功能：修改系统提示词、LLM配置、调整工具、ClawHub skill安装/卸载
    ═══════════════════════════════════════════════════════ */
 
-// [2026-09-07] OpenCode Zen 免费模型已下线（上游取消免费额度），供应商选项与
-// agent-llm-providers.js 依赖已全部移除，仅保留 BYOK / scnet / chat-accumulation 等通道
+// [2026-09-29] 0.4.10 恢复 OpenCode Zen 免费供应商（仅限本独立包；本地中继=客户端 IP）。
+// wire 口径对齐 teambot free_model_hub v1.56.45，详见 agent-llm-providers.js 头注。
+const OCProviders = await import('/static/agent/agent-llm-providers.js?v=20260929a');
 
 // [2026-09-07] i18n helper — 宿主页面提供 t()（aicq.me 全量字典 / 独立壳 shim）。
 // 键缺失时回退到英文文案，保证英文用户不会再看到纯中文面板。
@@ -21,11 +22,9 @@ async function openSettings(agentId) {
   const AgentTools = (await import('/static/agent/agent-tools.js?v=20260904b')).default;
   const config = await AgentStorage.getConfig(agentId);
   if (!config) { toast('Agent config not found', 'error'); return; }
-  // [2026-09-07] 遗留 opencode 配置迁移：免费通道已下线，面板按 openai 兼容展示，
-  // 保存任意 tab 即持久化为 openai（base_url/key/model 原样保留，引擎走通用路径）
-  if (config.llm_config && config.llm_config.provider === 'opencode') {
-    config.llm_config.provider = 'openai';
-  }
+  // [2026-09-29] 0.4.9 曾把遗留 opencode 配置迁移为 openai —— 0.4.10 供应商恢复后
+  // 该迁移已删除（再迁移会破坏用户已有的免费模型配置）。0.4.9 期间被改写过的
+  // 配置 provider=openai + base_url=opencode.ai 的组合仍能在引擎层正常工作。
 
   // 加载样式
   if (!document.getElementById('agent-styles')) {
@@ -71,6 +70,8 @@ async function openSettings(agentId) {
         <div class="form-group">
           <label>${t('ag_provider_label')}</label>
           <select id="settingsLlmProvider" onchange="updateSettingsLlmUI()">
+            <!-- [2026-09-29] OpenCode Zen 免费供应商排在第一位（与 0.4.8 前一致） -->
+            <option value="opencode" ${config.llm_config?.provider==='opencode'?'selected':''}>${t('ag_provider_opencode')}</option>
             <option value="scnet" ${config.llm_config?.provider==='scnet'?'selected':''}>${t('ag_provider_scnet')}</option>
             <option value="chat-accumulation" ${config.llm_config?.provider==='chat-accumulation'?'selected':''}>${t('ag_provider_accum')}</option>
             <option value="deepseek" ${config.llm_config?.provider==='deepseek'?'selected':''}>DeepSeek</option>
@@ -167,7 +168,28 @@ function updateSettingsLlmUI(existingConfig) {
   const fields = document.getElementById('settingsLlmFields');
   const cfg = existingConfig || {};
 
-  if (provider === 'scnet') {
+  if (provider === 'opencode') {
+    // [2026-08-28] OpenCode Zen — 匿名免费 LLM
+    // [2026-09-29] 恢复：一次性列出全部模型（free 优先），API 类型按模型 ID 自动推导
+    fields.innerHTML = `
+      <div class="form-group">
+        <label>${t('ag_opencode_model')}</label>
+        <select id="settingsOcModel" onchange="updateOpenCodeCustomModelUI('settings')"></select>
+        <div id="settingsOcApiTypeHint" style="font-size:11px;color:#1a7a1a;margin-top:4px;min-height:14px"></div>
+      </div>
+      <div class="form-group" id="settingsOcCustomModelGroup" style="display:none">
+        <label>${t('ag_opencode_custom_model')}</label>
+        <input type="text" id="settingsOcModelCustom" value="" placeholder="e.g. nemotron-3.5-lightning-free" oninput="updateOpenCodeCustomModelUI('settings')">
+      </div>
+      <div class="form-group">
+        <label>${t('ag_api_key')} (Optional)</label>
+        <input type="password" id="settingsOcApiKey" value="${cfg.api_key||''}" placeholder="${t('ag_opencode_key_hint')}">
+      </div>
+      <div class="form-group" style="padding:8px;background:#eef9ee;border-radius:6px;border:1px solid #bfe3bf;font-size:11px;color:#1a7a1a">
+        ${t('ag_opencode_free_note')}
+      </div>`;
+    window.updateOpenCodeModelOptions('settings', cfg.model || '');
+  } else if (provider === 'scnet') {
     fields.innerHTML = `
       <div class="form-group"><label>${t('ag_scnet_cookie')}</label><textarea id="settingsScnetCookie" rows="3">${cfg.cookie||''}</textarea></div>
       <div class="form-group"><label>${t('ag_model_id')}</label>
@@ -224,7 +246,12 @@ async function saveSettings(agentId, tab) {
   } else if (tab === 'llm') {
     const provider = document.getElementById('settingsLlmProvider').value;
     config.llm_config = { provider };
-    if (provider === 'scnet') {
+    if (provider === 'opencode') {
+      // [2026-08-28] OpenCode Zen 免费匿名 LLM（API Key 可选）[2026-09-29 恢复]
+      const oc = OCProviders.default.collectOpenCodeConfig('settings');
+      if (oc.error) { toast(t(oc.error), 'error'); return; }
+      Object.assign(config.llm_config, oc);
+    } else if (provider === 'scnet') {
       config.llm_config.cookie = document.getElementById('settingsScnetCookie').value;
       config.llm_config.model_id = parseInt(document.getElementById('settingsScnetModel').value);
     } else if (provider === 'chat-accumulation') {
@@ -263,7 +290,12 @@ async function testLLMConnection(agentId) {
   // 收集当前 tab 的配置（不依赖 saveSettings）
   const provider = document.getElementById('settingsLlmProvider').value;
   let llmConfig = { provider };
-  if (provider === 'scnet') {
+  if (provider === 'opencode') {
+    // [2026-08-28] OpenCode Zen — 独立测试路径（支持两种 API 类型 + 匿名无 Key）[2026-09-29 恢复]
+    const oc = OCProviders.default.collectOpenCodeConfig('settings');
+    if (oc.error) { resultEl.innerHTML = '<span style="color:#c00">❌ ' + t(oc.error) + '</span>'; return; }
+    Object.assign(llmConfig, oc);
+  } else if (provider === 'scnet') {
     llmConfig.cookie = document.getElementById('settingsScnetCookie')?.value.trim() || '';
     llmConfig.model_id = parseInt(document.getElementById('settingsScnetModel')?.value || '520');
     if (!llmConfig.cookie) {
@@ -308,6 +340,18 @@ async function testLLMConnection(agentId) {
 
   const startTime = Date.now();
   try {
+    // [2026-08-28] OpenCode Zen — 独立测试路径（支持两种 API 类型 + 匿名无 Key）[2026-09-29 恢复]
+    if (provider === 'opencode') {
+      const r = await OCProviders.default.testOpenCodeConnection(llmConfig);
+      const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+      if (r.ok) {
+        resultEl.innerHTML = `<span style="color:green">✅ ${t('ag_test_ok')}</span><br><span style="font-size:12px">${t('ag_model_label')}: <code>${r.model || llmConfig.model}</code> (${llmConfig.api_type})</span><br><span style="font-size:12px">${t('ag_response_preview')}: ${r.preview}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+      } else {
+        resultEl.innerHTML = `<span style="color:#c00">❌ ${r.error}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
+      }
+      return;
+    }
+
     // 构建测试请求 — 发送一个最小的 ping 消息
     const proxyBody = provider === 'scnet' ? {
       target_url: 'https://www.scnet.cn/acx/chatbot/v1/chat/completion',

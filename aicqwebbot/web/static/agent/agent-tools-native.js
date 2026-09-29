@@ -2044,12 +2044,13 @@ const AgentToolsNative = {
     ws['!ref'] = XLSX.utils.encode_range(range);
   },
 
-  // ══ analyze-image [2026-09-03] ═══════════════════════════════════
-  // 图片识别工具：收图时引擎把图片存入 _lastImages 槽位；
-  // 模型需要看图时调用本工具 → 经 llm-proxy 用【用户自配的 BYOK 模型】看图。
-  // [2026-09-07] 原 OpenCode Zen 免费视觉链已随 OpenCode 下线移除；
-  // 现直接用 agent 当前 llm_config（chat/completions 或 responses 按协议路由），
-  // 模型不支持视觉时返回明确错误，提示用户在设置里换 vision 模型。
+  // ══ analyze-image [2026-09-03, 恢复免费视觉链 0.4.10] ═══════════════════
+  // 图片识别工具：agent 主模型多数不带视觉（免费模型带图直接 400），
+  // 收图时引擎把图片存入 _lastImages 槽位，主模型只收文字占位符；
+  // 模型需要看图时调用本工具看图。
+  // [2026-09-29] 恢复 OpenCode Zen 免费视觉链（仅限本独立包，本地中继=客户端 IP）：
+  //   链路 = localStorage 缓存优先 → 实测免费链（新目录）→ 用户自配 BYOK 兑底。
+  //   免费模型调用走指纹口径（恒流式+身份头+诱饵工具，_visionDescribe 内分支处理）。
   _lastImages: {},   // sessionId → { dataUrl, ts }
 
   rememberImage(sessionId, dataUrl) {
@@ -2099,13 +2100,12 @@ const AgentToolsNative = {
   },
 
   async analyze_image(args, ctx) {
+    // [2026-09-03 实测口径 + 2026-09-29 目录更新] 免费视觉链：mimo 系能看图
+    // （0.4.8 时代实测 mimo-v2.5-free 答对；新目录补充 v2.6），
+    // 后接 nemotron/space-bunny 作地域差异兑底；成功模型写 localStorage 缓存。
+    const VISION_CHAIN = ['mimo-v2.5-free', 'mimo-v2.6-flash-free', 'nemotron-3.5-lightning-free', 'space-bunny-free'];
+    const CACHE_KEY = 'aicq_agent_vision_model_v2';
     const MAX_AGE_MS = 30 * 60 * 1000;   // "最新图片"有效期 30 分钟
-
-    // 0. 用户自配模型（BYOK）— 不再依赖任何免费视觉链
-    const llmConfig = (ctx && ctx.agentConfig && ctx.agentConfig.llm_config) || {};
-    if (!llmConfig.model || (!llmConfig.base_url && llmConfig.provider !== 'openai')) {
-      return { success: false, error: 'No LLM configured for image analysis. Open settings and configure a vision-capable model (e.g. gpt-4o-mini).' };
-    }
 
     // 1. 解析图片来源 → dataURI
     let dataUrl = '';
@@ -2134,10 +2134,35 @@ const AgentToolsNative = {
     const question = String((args && args.question) || '').trim() ||
       '请详细描述这张图片：主要物体/场景、所有可见文字（原样给出）、颜色、品牌或标识，以及值得注意的细节。';
 
-    // 4. 用当前配置的模型看图（不支持视觉时报明确错误）
-    const r = await this._visionDescribe(llmConfig, dataUrl, question, ctx);
-    if (r.success) return { success: true, output: r.output, model: llmConfig.model };
-    return { success: false, error: 'Vision analysis with your configured model (' + llmConfig.model + ') failed — it may not support image input. Configure a vision-capable model in settings. Detail: ' + String(r.error || '').slice(0, 220) };
+    // 4. 视觉链：免费 OpenCode 链（缓存优先）→ 用户自配 BYOK 兑底
+    //    [2026-09-29] 恢复；BYOK 不存在时纯靠免费链，免费链全挂时报明确错误
+    let cached = '';
+    try { cached = localStorage.getItem(CACHE_KEY) || ''; } catch (e) {}
+    const byok = (ctx && ctx.agentConfig && ctx.agentConfig.llm_config) || {};
+    const byokUsable = !!(byok.model && (byok.base_url || byok.provider === 'openai'));
+    const errors = [];
+    const ocBase = 'https://opencode.ai/zen/v1';
+    const chain = [];
+    for (const m of [cached].concat(VISION_CHAIN)) {
+      if (m && chain.findIndex(c => c.model === m) === -1) {
+        chain.push({ provider: 'opencode', api_type: 'openai-completion', model: m, base_url: ocBase, api_key: '' });
+      }
+    }
+    if (byokUsable) chain.push(byok);
+    if (!chain.length) {
+      return { success: false, error: 'No vision model available. Configure a vision-capable model (e.g. gpt-4o-mini) in settings, or retry later (free OpenCode vision pool unreachable).' };
+    }
+    for (const vcfg of chain) {
+      const isByok = vcfg.provider !== 'opencode';
+      const r = await this._visionDescribe(vcfg, dataUrl, question, ctx);
+      if (r.success) {
+        if (!isByok) { try { localStorage.setItem(CACHE_KEY, vcfg.model); } catch (e) {} }
+        return { success: true, output: r.output, model: vcfg.model + (isByok ? ' (your model)' : ' (free)') };
+      }
+      errors.push((isByok ? 'your-model(' + vcfg.model + ')' : vcfg.model) + ': ' + String(r.error || '').slice(0, 140));
+      if (!isByok && vcfg.model === cached) { try { localStorage.removeItem(CACHE_KEY); } catch (e) {} }
+    }
+    return { success: false, error: 'All vision models failed — ' + errors.join(' | ') };
   },
 
   // 经 llm-proxy 下载图片（解决 CORS + aicq 内部文件的鉴权），返回 dataURI
@@ -2182,29 +2207,51 @@ const AgentToolsNative = {
     } catch (e) { return dataUrl; }
   },
 
-  // 单个视觉模型调用 — 用 agent 自配的 llm_config，按协议路由，经 llm-proxy 中继
-  //   api_type='openai-response' → POST {base}/responses (input_image)
-  //   其余（默认）              → POST {base}/chat/completions (image_url)
+  // 单个视觉模型调用 — 经 llm-proxy 中继
+  //   provider='opencode'（免费链）→ 官方 zen 端点 + 指纹口径（恒流式 + 身份头 +
+  //     诱饵工具 + SSE 聚合，对齐 teambot free_model_hub v1.56.45）[2026-09-29]
+  //   其余（BYOK）→ 按协议路由：api_type='openai-response' → {base}/responses (input_image)
+  //                 默认                     → {base}/chat/completions (image_url)
   async _visionDescribe(llmConfig, dataUrl, question, ctx) {
     const tok = this._authToken(ctx);
-    const isResponses = (llmConfig.api_type === 'openai-response' || llmConfig.api_type === 'response');
-    const base = String(llmConfig.base_url || 'https://api.openai.com/v1').replace(/\/+$/, '');
+    const isOC = (llmConfig.provider === 'opencode');
+    let OC = null;
+    if (isOC) {
+      try { OC = (await import('/static/agent/agent-llm-providers.js?v=20260929a')).default; } catch (e) { OC = null; }
+      if (!OC) return { success: false, error: 'opencode provider module unavailable' };
+    }
+    const isResponses = !isOC && (llmConfig.api_type === 'openai-response' || llmConfig.api_type === 'response');
+    const base = String(llmConfig.base_url || (isOC ? OC.OPENCODE_BASE_URL : 'https://api.openai.com/v1')).replace(/\/+$/, '');
     const target = base + (isResponses ? '/responses' : '/chat/completions');
-    const innerHeaders = { 'Content-Type': 'application/json' };
-    if (llmConfig.api_key) innerHeaders['Authorization'] = 'Bearer ' + llmConfig.api_key;
+    let innerHeaders;
     let innerBody;
-    if (isResponses) {
-      innerBody = { model: llmConfig.model, stream: false, max_output_tokens: 4096, store: false,
-        input: [{ role: 'user', content: [
-          { type: 'input_text', text: question },
-          { type: 'input_image', image_url: dataUrl, detail: 'auto' }
-        ] }] };
-    } else {
-      innerBody = { model: llmConfig.model, stream: false, max_tokens: 1024,
+    if (isOC) {
+      // 免费链：指纹身份头 + 恒流式 + 诱饵工具（带图主模型本就不看 tools，诱饵只为过闸）
+      innerHeaders = Object.assign({ 'Content-Type': 'application/json' }, OC._ocIdentityHeaders());
+      if (llmConfig.api_key) innerHeaders['Authorization'] = 'Bearer ' + llmConfig.api_key;
+      innerBody = { model: llmConfig.model, stream: true, max_tokens: 1024,
         messages: [{ role: 'user', content: [
           { type: 'text', text: question },
           { type: 'image_url', image_url: { url: dataUrl } }
-        ] }] };
+        ] }],
+        tools: OC._ocMimicTools(), tool_choice: 'auto',
+        stream_options: { include_usage: true } };
+    } else {
+      innerHeaders = { 'Content-Type': 'application/json' };
+      if (llmConfig.api_key) innerHeaders['Authorization'] = 'Bearer ' + llmConfig.api_key;
+      if (isResponses) {
+        innerBody = { model: llmConfig.model, stream: false, max_output_tokens: 4096, store: false,
+          input: [{ role: 'user', content: [
+            { type: 'input_text', text: question },
+            { type: 'input_image', image_url: dataUrl, detail: 'auto' }
+          ] }] };
+      } else {
+        innerBody = { model: llmConfig.model, stream: false, max_tokens: 1024,
+          messages: [{ role: 'user', content: [
+            { type: 'text', text: question },
+            { type: 'image_url', image_url: { url: dataUrl } }
+          ] }] };
+      }
     }
     const resp = await fetch('/api/v1/agent/llm-proxy', {
       method: 'POST',
@@ -2213,14 +2260,31 @@ const AgentToolsNative = {
         target_url: target,
         method: 'POST',
         headers: innerHeaders,
-        stream: false,
+        stream: !!isOC,   // 免费链恒流式（SSE 透传）；BYOK 非流式 JSON
         body: JSON.stringify(innerBody)
       })
     });
     const text = await resp.text();
+    if (!resp.ok) {
+      let detail = text;
+      try { const j = JSON.parse(text); detail = (j.error && (j.error.message || j.error)) || j.error || text; } catch (e) {}
+      return { success: false, error: 'HTTP ' + resp.status + ' ' + String(detail).slice(0, 160) };
+    }
     let data;
-    try { data = JSON.parse(text); }
-    catch (e) { return { success: false, error: 'HTTP ' + resp.status + ' (non-JSON response)' }; }
+    if (isOC) {
+      // SSE → 本地聚合（含诱饵 tool_call 过滤）
+      const agg = await OC._ocAggregateStreamResponse({ text: async () => text });
+      if (agg.json) data = agg.json;
+      else {
+        const a = agg.aggregated;
+        const out0 = String(a.content || '').trim();
+        if (!out0) return { success: false, error: 'empty answer (model may not support vision)' };
+        return { success: true, output: out0 };
+      }
+    } else {
+      try { data = JSON.parse(text); }
+      catch (e) { return { success: false, error: 'HTTP ' + resp.status + ' (non-JSON response)' }; }
+    }
     if (data && data.type === 'error') {
       const em = (data.error && (data.error.message || data.error.type)) || 'unknown error';
       return { success: false, error: em };

@@ -273,14 +273,14 @@
       const raw = String(text == null ? '' : text);
       try {
         if (window.marked && window.DOMPurify) {
-          if (!md._hooked) {
+          if (!UI.md._hooked) {
             DOMPurify.addHook('afterSanitizeAttributes', (n) => {
               if (n.tagName === 'A' && n.getAttribute('href')) {
                 n.setAttribute('target', '_blank');
                 n.setAttribute('rel', 'noopener noreferrer');
               }
             });
-            md._hooked = true;
+            UI.md._hooked = true;
           }
           const html = marked.parse(raw, { gfm: true, breaks: true });
           return '<div class="md">' + DOMPurify.sanitize(html) + '</div>';

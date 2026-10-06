@@ -3,7 +3,7 @@
    ═════════════════════════════════════════════════════ */
 
 // Cache-buster version for dynamic imports — bump when agent modules change
-const _AGENT_VER = '20261006a';
+const _AGENT_VER = '20261006b';
 function _agUrl(name) { return `/static/agent/${name}?v=${_AGENT_VER}`; }
 
 const AgentEngine = {
@@ -59,6 +59,14 @@ const AgentEngine = {
   },
   _agentWS: {},  // agentId → WebSocket
   _running: {},  // agentId+sessionId → boolean (防重入)
+  // [ADD 2026-10-06] Stop-button support:
+  //   _stopReq  — lockKey → user asked to stop this run (checked at every
+  //               await boundary in _agentLoop / _callLLMRetry)
+  //   _llmAbort — lockKey → AbortController for the in-flight LLM fetch
+  //   _llmSignal— AbortSignal handed to the llm-proxy fetches (per call)
+  _stopReq: {},
+  _llmAbort: {},
+  _llmSignal: null,
   // [FIX 2026-08-29] agentId → 当前回复的流上下文
   //   { streamId, isGroup, textSegments, contentOrder, toolCalls }
   // 修复聊天记录不持久化 bug 的关键：每次回复复用同一个 stream_id，
@@ -363,6 +371,7 @@ const AgentEngine = {
       return;
     }
     this._running[lockKey] = true;
+    delete this._stopReq[lockKey];   // [ADD 2026-10-06] fresh run — clear any stale stop request
 
     // [FIX 2026-08-29] 为本次回复注册稳定 stream_id —— 聊天记录持久化修复的核心。
     // 之前 _sendStreamChunk/_sendStreamEnd 每次调用都新生成 stream_id（Date.now()），
@@ -426,11 +435,40 @@ const AgentEngine = {
       await this._agentLoop(userMessage, convSessionId, effectiveConfig, replyTarget, msg);
     } catch(e) {
       console.error('[AgentEngine] Agent loop error:', e);
+      // [ADD 2026-10-06] an in-flight LLM fetch abort (user pressed Stop) lands
+      // here as a thrown AbortError — surface it as a clean stop note instead
+      // of a generic failure.
+      if (this._stopHit(agentId, convSessionId)) {
+        this._sendStreamChunk(agentId, replyTarget, config, '(Stopped by user)', 'text');
+      }
       this._sendStreamEnd(agentId, replyTarget || sessionId, config);
     } finally {
       this._running[lockKey] = false;
       delete this._activeStreams[agentId];
+      delete this._llmAbort[lockKey];   // [ADD 2026-10-06]
+      delete this._stopReq[lockKey];    // [ADD 2026-10-06]
     }
+  },
+
+  // ══ [ADD 2026-10-06] Stop-button public API ═════════════════════════════
+  // isBusy(agentId, sessionId) → true while the agent loop for this chat
+  // session is running (send button should show ⏹ Stop).
+  isBusy(agentId, sessionId) {
+    return !!this._running[`${agentId}_${sessionId || ''}`];
+  },
+  // requestStop(agentId, sessionId) — flip the stop flag AND abort any
+  // in-flight LLM fetch. The loop checks _stopReq at every await boundary
+  // (between iterations, before/after each tool call, between 429 retries),
+  // so a running task halts at the earliest safe point.
+  requestStop(agentId, sessionId) {
+    const k = `${agentId}_${sessionId || ''}`;
+    this._stopReq[k] = true;
+    try { if (this._llmAbort[k]) this._llmAbort[k].abort(); } catch (e) {}
+    console.log('[AgentEngine] stop requested:', k);
+    return true;
+  },
+  _stopHit(agentId, sessionId) {
+    return !!this._stopReq[`${agentId}_${sessionId || ''}`];
   },
 
   // 核心循环
@@ -706,11 +744,24 @@ const AgentEngine = {
     // 人工"请重试", 长任务极易中断 → 自动重试最多 3 次 (退避 1.5/3/4.5s)。
     let emptyRetries = 0;
     for (let i = 0; i < maxIterations; i++) {
+      // [ADD 2026-10-06] Stop requested (button pressed while tools ran / between rounds)
+      if (this._stopHit(config.agent_id, sessionId)) {
+        this._sendStreamChunk(config.agent_id, replyTarget, config, '(Stopped by user)', 'text');
+        break;
+      }
       // 调 LLM
       // [2026-08-28] 传入 replyTarget — 流式路径需要知道往哪个会话发 stream_chunk
       // [FIX 2026-08-30] const → let: 空回复降级重试路径需要重新赋值 llmResp
       // [2026-09-06] 经 _callLLMRetry 包装：429 限流 30s 起算指数退避，最多重试 5 次
-      let llmResp = await this._callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget);
+      const _abortCtl = new AbortController();          // [ADD 2026-10-06] lets requestStop kill the in-flight LLM fetch
+      this._llmAbort[`${config.agent_id}_${sessionId}`] = _abortCtl;
+      let llmResp = await this._callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget, undefined, _abortCtl);
+
+      // [ADD 2026-10-06] Stop while the LLM call was in flight
+      if (this._stopHit(config.agent_id, sessionId) || (llmResp && llmResp.error === '__user_stopped__')) {
+        this._sendStreamChunk(config.agent_id, replyTarget, config, '(Stopped by user)', 'text');
+        break;
+      }
 
       // [FIX 2026-10-06] Image degrade retry — free text-only models reject
       // multimodal image_url payloads with HTTP 400 ("免费模型带图直接 400").
@@ -766,6 +817,14 @@ const AgentEngine = {
 
         // 执行每个工具，并发送 tool_call / tool_result 流式事件
         for (const tc of llmResp.tool_calls) {
+          // [ADD 2026-10-06] Stop pressed before this tool ran — close its card
+          // with a stopped result so the UI doesn't leave a spinner, then halt.
+          if (this._stopHit(config.agent_id, sessionId)) {
+            this._sendStreamChunk(config.agent_id, replyTarget, config, {
+              output: 'Stopped by user', success: false, error: 'stopped', id: tc.id
+            }, 'tool_result');
+            break;
+          }
           let args = {};
           try { args = JSON.parse(tc.function.arguments); } catch(e) {}
           const ctx = { agentId: config.agent_id, sessionId, ws: this._agentWS[config.agent_id], agentConfig: config, // [FIX 2026-08-29] replyTarget = the real account_id for WS sends — sessionId may be a
@@ -826,6 +885,11 @@ const AgentEngine = {
 
         // 继续下一轮（让 LLM 看到工具结果后继续）
         // 发送 "thinking" 状态表示下一轮 LLM 调用
+        // [ADD 2026-10-06] stop pressed during the tool round — halt here
+        if (this._stopHit(config.agent_id, sessionId)) {
+          this._sendStreamChunk(config.agent_id, replyTarget, config, '(Stopped by user)', 'text');
+          break;
+        }
         this._sendStreamChunk(config.agent_id, replyTarget, config, 'Calling LLM...', 'thinking');
         continue;
       }
@@ -844,7 +908,14 @@ const AgentEngine = {
           this._sendStreamChunk(config.agent_id, replyTarget, config, `(LLM empty reply — auto-retry ${emptyRetries}/5${forceNonStream ? ' · non-stream' : ''}...)`, 'thinking');
           await new Promise(r => setTimeout(r, delay));
           // [2026-09-06] 同样经 _callLLMRetry 包装（429 指数退避）
-          llmResp = await this._callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream);
+          const _abortCtl2 = new AbortController();   // [ADD 2026-10-06]
+          this._llmAbort[`${config.agent_id}_${sessionId}`] = _abortCtl2;
+          llmResp = await this._callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream, _abortCtl2);
+          // [ADD 2026-10-06] stop pressed during the empty-retry call
+          if (this._stopHit(config.agent_id, sessionId) || (llmResp && llmResp.error === '__user_stopped__')) {
+            this._sendStreamChunk(config.agent_id, replyTarget, config, '(Stopped by user)', 'text');
+            break;
+          }
           if (llmResp && llmResp.success && (llmResp.content || '').trim()) {
             emptyRetries = 0;
             // 拿到非流式结果, 落到下方正常处理 (可能含 tool_calls → 继续循环)
@@ -884,19 +955,28 @@ const AgentEngine = {
   // [2026-09-06] 429 限流专用包装：指数退避重试，30s 起算（30/60/120/240/480s），最多 5 次。
   // 判定依据：底层调用返回 http_status === 429（各 provider 失败路径统一携带该字段）。
   // 每次等待前向聊天流发 thinking 提示，让长等待对用户可见。
-  async _callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream) {
+  async _callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream, abortCtl) {
     const MAX_429_RETRIES = 5;       // 最多重试 5 次
     const BASE_429_MS = 30 * 1000;   // 30 秒起算
     let attempt = 0;
     while (true) {
-      const r = await this._callLLM(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream);
+      // [ADD 2026-10-06] stop requested while waiting in the retry queue
+      if (this._stopHit(config.agent_id, sessionId)) return { success: false, error: '__user_stopped__' };
+      const r = await this._callLLM(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream, abortCtl);
+      if (r && r.success === false && r.error === '__user_stopped__') return r;   // [ADD 2026-10-06] never retry a user stop
       if (r && r.success === false && r.http_status === 429 && attempt < MAX_429_RETRIES) {
         const delay = BASE_429_MS * Math.pow(2, attempt);   // 30/60/120/240/480s
         attempt++;
         console.warn(`[AgentEngine._callLLMRetry] HTTP 429 rate-limited — exponential backoff retry ${attempt}/${MAX_429_RETRIES} in ${Math.round(delay / 1000)}s`);
         this._sendStreamChunk(config.agent_id, replyTarget, config,
           `(Model rate-limited (HTTP 429) — auto-retry ${attempt}/${MAX_429_RETRIES} in ${Math.round(delay / 1000)}s...)`, 'thinking');
-        await new Promise(res => setTimeout(res, delay));
+        // [ADD 2026-10-06] interruptible sleep — a stop request cuts the 429
+        // backoff immediately instead of waiting out the full delay
+        const _t0 = Date.now();
+        while ((Date.now() - _t0) < delay) {
+          if (this._stopHit(config.agent_id, sessionId)) return { success: false, error: '__user_stopped__' };
+          await new Promise(res => setTimeout(res, Math.min(250, delay)));
+        }
         continue;
       }
       return r;
@@ -904,7 +984,12 @@ const AgentEngine = {
   },
 
   // 调 LLM API（通过 aicq 服务器代理）
-  async _callLLM(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream) {
+  // [ADD 2026-10-06] abortCtl — AbortController from _agentLoop; its signal is
+  // stashed on the instance so every llm-proxy fetch below can honor a user
+  // stop mid-flight (fetch/read throws AbortError → propagates up to
+  // handleMessage's catch which emits the clean stop note).
+  async _callLLM(messages, tools, toolsNL, config, sessionId, replyTarget, forceNonStream, abortCtl) {
+    this._llmSignal = (abortCtl && abortCtl.signal) || null;   // [ADD 2026-10-06]
     const llmConfig = config.llm_config;
     const provider = llmConfig.provider;
     // [C4] Store agent's access_token for authenticated proxy calls
@@ -1192,7 +1277,8 @@ const AgentEngine = {
       const _resp = await fetch('/api/v1/agent/llm-proxy', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (llmConfig.__authToken || '') },
-        body: JSON.stringify(_proxyBody)
+        body: JSON.stringify(_proxyBody),
+        signal: this._llmSignal || undefined   // [ADD 2026-10-06] user-stop aborts the in-flight LLM call
       });
       if (!_resp.ok) {
         let _errDetail = '';
@@ -1278,7 +1364,8 @@ const AgentEngine = {
     const resp = await fetch('/api/v1/agent/llm-proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (llmConfig.__authToken || '') },
-      body: JSON.stringify(proxyBody)
+      body: JSON.stringify(proxyBody),
+      signal: this._llmSignal || undefined   // [ADD 2026-10-06] user-stop aborts the in-flight LLM call
     });
 
     // DEBUG: log what we sent to LLM (truncated)
@@ -1395,7 +1482,8 @@ const AgentEngine = {
     const resp = await fetch('/api/v1/agent/llm-proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (llmConfig.__authToken || '') },
-      body: JSON.stringify(proxyBody)
+      body: JSON.stringify(proxyBody),
+      signal: this._llmSignal || undefined   // [ADD 2026-10-06] user-stop aborts the in-flight LLM call
     });
 
     if (!resp.ok) {
@@ -1457,7 +1545,8 @@ const AgentEngine = {
     const resp = await fetch('/api/v1/agent/llm-proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (llmConfig.__authToken || '') },
-      body: JSON.stringify(proxyBody)
+      body: JSON.stringify(proxyBody),
+      signal: this._llmSignal || undefined   // [ADD 2026-10-06] user-stop aborts the in-flight LLM call
     });
 
     if (!resp.ok) {
@@ -1816,7 +1905,8 @@ const AgentEngine = {
     const resp = await fetch('/api/v1/agent/llm-proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + (llmConfig.__authToken || '') },
-      body: JSON.stringify(proxyBody)
+      body: JSON.stringify(proxyBody),
+      signal: this._llmSignal || undefined   // [ADD 2026-10-06] user-stop aborts the in-flight LLM call
     });
 
     if (!resp.ok) {

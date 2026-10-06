@@ -838,6 +838,7 @@
     const box = $('inputBox');
     const text = box.value.trim();
     if (!text || !window.__localBus) return;
+    if (_sendModeStop) return;   // [ADD 2026-10-06] button is in Stop mode — ignore sends
     UI.addUser(text);
     box.value = '';
     box.style.height = 'auto';
@@ -961,7 +962,38 @@
   $('f_freeModel').addEventListener('change', updateFreeModelUI);
   $('f_freeModelCustom').addEventListener('input', updateFreeModelUI);
   $('f_apitype').addEventListener('change', updateApiHint);
-  $('btnSend').addEventListener('click', sendCurrent);
+  $('btnSend').addEventListener('click', () => {
+    // [ADD 2026-10-06] in Stop mode the send button becomes ⏹ Stop — click halts
+    // the running task (loop-boundary checks + in-flight LLM fetch abort).
+    if (_sendModeStop) {
+      if (window.__engine && currentAgentId) window.__engine.requestStop(currentAgentId, UI.cs);
+      return;
+    }
+    sendCurrent();
+  });
+
+  // ═════════ [ADD 2026-10-06] Send ⇄ Stop button auto-switch ═════════
+  // While the agent is executing a task (engine loop running for this chat
+  // session) the composer button flips ➤ → ⏹ automatically; clicking it stops
+  // execution. Reverts to ➤ as soon as the engine frees the run lock.
+  let _sendModeStop = false;
+  function setSendMode(stop) {
+    if (stop === _sendModeStop) return;
+    _sendModeStop = stop;
+    const b = $('btnSend');
+    if (!b) return;
+    b.textContent = stop ? '⏹' : '➤';
+    b.title = stop ? 'Stop' : 'Send';
+    b.classList.toggle('stopping', stop);
+  }
+  setInterval(() => {
+    let busy = false;
+    try {
+      busy = !!(window.__engine && window.__engine.isBusy && currentAgentId &&
+                window.__engine.isBusy(currentAgentId, UI.cs));
+    } catch (e) { busy = false; }
+    setSendMode(busy);
+  }, 350);
   $('inputBox').addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendCurrent(); }
   });

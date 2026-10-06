@@ -3,7 +3,7 @@
    ═════════════════════════════════════════════════════ */
 
 // Cache-buster version for dynamic imports — bump when agent modules change
-const _AGENT_VER = '20261007b';
+const _AGENT_VER = '20261007c';
 function _agUrl(name) { return `/static/agent/${name}?v=${_AGENT_VER}`; }
 
 const AgentEngine = {
@@ -678,6 +678,12 @@ const AgentEngine = {
     // 不受 per-agent 工具勾选影响（存量 agent 无需重新配置即可用）
     if (!tools.some(t => t.function && t.function.name === 'analyze-image')) {
       tools.push(...AgentTools.toOpenAIFormat(['analyze-image']));
+    }
+    // [ADD 2026-10-07] git-clone 是后加工具 —— 存量 agent 的 config.tools 允许
+    // 清单快照早于它，永远不含该名字 → LLM 看不到工具只能用 url-read 变通。
+    // 按 analyze-image 同款先例强制附加（服务端已限流 6 次/10 分钟/用户）。
+    if (!tools.some(t => t.function && t.function.name === 'git-clone')) {
+      tools.push(...AgentTools.toOpenAIFormat(['git-clone']));
     }
     // [2026-09-04] search-session-history 内置强制注册 — 上下文压缩的配套回查工具，
     // 压缩提醒文本会让模型调用它，必须始终可用

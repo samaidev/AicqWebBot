@@ -264,13 +264,42 @@
       return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
     },
 
+    // [UPGRADE 2026-10-06] full markdown via vendored marked + DOMPurify
+    // (ported from apishare.cc). breaks:true keeps chat-style single newlines
+    // visible; GFM adds tables / task lists / strikethrough. Output is
+    // sanitized (model output is untrusted) and <a> links are forced to open
+    // in a new tab so external pages never blow the app away.
     md(text) {
-      // lightweight markdown: fenced code, inline code, bold
-      let html = this.esc(text);
-      html = html.replace(/```([\s\S]*?)```/g, (m, code) => `<pre><code>${code}</code></pre>`);
+      const raw = String(text == null ? '' : text);
+      try {
+        if (window.marked && window.DOMPurify) {
+          if (!md._hooked) {
+            DOMPurify.addHook('afterSanitizeAttributes', (n) => {
+              if (n.tagName === 'A' && n.getAttribute('href')) {
+                n.setAttribute('target', '_blank');
+                n.setAttribute('rel', 'noopener noreferrer');
+              }
+            });
+            md._hooked = true;
+          }
+          const html = marked.parse(raw, { gfm: true, breaks: true });
+          return '<div class="md">' + DOMPurify.sanitize(html) + '</div>';
+        }
+      } catch (e) { /* vendor libs unavailable — fall through to lite renderer */ }
+      // fallback: escaped-lite markdown (placeholders keep <pre> newlines intact)
+      let html = this.esc(raw);
+      const pres = [];
+      html = html.replace(/```([\s\S]*?)```/g, (m, code) => {
+        pres.push('<pre><code>' + code.replace(/\n+$/, '') + '</code></pre>');
+        return '\u0000P' + (pres.length - 1) + '\u0000';
+      });
       html = html.replace(/`([^`\n]+)`/g, '<code>$1</code>');
       html = html.replace(/\*\*([^*\n]+)\*\*/g, '<b>$1</b>');
-      return html;
+      html = html.replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1<i>$2</i>');
+      html = html.replace(/(^|\s)(https?:\/\/[^\s<]+)/g, '$1<a href="$2" target="_blank" rel="noopener noreferrer">$2</a>');
+      html = html.replace(/\n/g, '<br>');
+      html = html.replace(/\u0000P(\d+)\u0000/g, (m, i) => pres[+i]);
+      return '<div class="md">' + html + '</div>';
     },
 
     addUser(text) {

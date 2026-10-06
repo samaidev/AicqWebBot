@@ -146,6 +146,23 @@ body {
   background: var(--accent); color: #fff; font-size: 17px;
 }
 #btnSend:hover { filter: brightness(1.1); }
+
+/* ─── [ADD 2026-10-06] composer image / attachment buttons + media bubbles ─── */
+#btnImage, #btnAttach {
+  width: 40px; height: 44px; border-radius: 12px; cursor: pointer; flex-shrink: 0;
+  background: var(--card); border: 1px solid var(--border); color: var(--text);
+  font-size: 16px; line-height: 1; padding: 0;
+}
+#btnImage:hover, #btnAttach:hover { border-color: var(--accent); }
+.msg.user.user-media img.chat-img { margin: 0; }
+.msg.user .media-caption { margin-top: 6px; }
+.msg.user .file-chip {
+  display: inline-flex; align-items: center; max-width: 240px;
+  background: rgba(255, 255, 255, 0.18); border-radius: 8px;
+  padding: 4px 10px; font-size: 13px;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+img.chat-img { max-width: 260px; border-radius: 10px; display: block; margin: 8px 0; }
 img.chat-img { max-width: 260px; border-radius: 10px; display: block; margin: 8px 0; }
 
 /* ═══════════ Settings / file-manager modals (bundle parity) ═══════════

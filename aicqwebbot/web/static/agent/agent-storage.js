@@ -157,7 +157,7 @@ const AgentStorage = {
   },
 
   // ═══ 对话历史 ═══
-  async addConversation(agentId, sessionId, role, content, toolCalls, toolCallId) {
+  async addConversation(agentId, sessionId, role, content, toolCalls, toolCallId, media) {
     await this.init();
     if (!this._db) return;
     // [2026-09-07] id 单调有序：同毫秒内连续写入（如 assistant.tool_calls → tool.result）
@@ -176,6 +176,10 @@ const AgentStorage = {
     // 的工具调用链（assistant.tool_calls + tool.tool_call_id），满足喂给 LLM 的
     // “全量信息”要求（用户输入/智能体回复/工具调用命令/工具调用结果）。
     if (toolCallId) msg.tool_call_id = toolCallId;
+    // [ADD 2026-10-06] 用户消息可携带 media 元数据（图片/附件在虚拟 FS 的路径、
+    // url、文件名等）—— 会话重放据此重新渲染媒体气泡；只存引用不存字节，
+    // LLM 上下文构建只读 content/tool_calls，不受影响。
+    if (media) msg.media = media;
     return new Promise((resolve) => {
       const tx = this._db.transaction('agent_conversations', 'readwrite');
       tx.objectStore('agent_conversations').put(msg);

@@ -3,7 +3,7 @@
    ═════════════════════════════════════════════════════ */
 
 // Cache-buster version for dynamic imports — bump when agent modules change
-const _AGENT_VER = '20260904b';
+const _AGENT_VER = '20261006a';
 function _agUrl(name) { return `/static/agent/${name}?v=${_AGENT_VER}`; }
 
 const AgentEngine = {
@@ -69,7 +69,12 @@ const AgentEngine = {
   async connectAgent(config) {
     const agentId = config.agent_id;
     if (this._agentWS[agentId]) {
-      try { this._agentWS[agentId].close(); } catch(e) {}
+      // [FIX 2026-10-06] mark the old socket as intentionally closed so its
+      // onclose handler does NOT schedule a backoff reconnect — in-place
+      // hot-switches (model picker, bridge config push) call connectAgent
+      // deliberately and would otherwise double-reconnect a few seconds later.
+      try { this._agentWS[agentId]._intentionalClose = true; } catch (e) {}
+      try { this._agentWS[agentId].close(); } catch (e) {}
     }
     const wsUrl = `${location.protocol === 'https:' ? 'wss' : 'ws'}://${location.host}/ws?token=${config.access_token}`;
     const ws = new WebSocket(wsUrl);
@@ -149,10 +154,15 @@ const AgentEngine = {
             // [OPTIMIZE 2026-07-06] Extract media fields for multimodal image handling.
             // Server relays: media_url (server path), media_data (base64 data URI),
             // file_info (JSON with filename/size/url), msgType (image/file/text).
+            // [ADD 2026-10-06] media_fs_path (client-side virtual FS location of the
+            // uploaded bytes) + file_name — persisted with the conversation record so
+            // the chat replay can re-render the media bubble after a page refresh.
             const _mediaUrl = data.media_url || msg.media_url || '';
             const _mediaData = data.media_data || msg.media_data || '';
             const _fileInfo = data.file_info || msg.file_info || '';
             const _msgType = data.msgType || data.type || msg.msgType || 'text';
+            const _mediaFsPath = data.media_fs_path || msg.media_fs_path || '';
+            const _fileName = data.file_name || msg.file_name || '';
             // 去重：60秒内同 from+content+media 的消息只处理一次
             // 服务器在消息未被 ACK 时会反复重发
             // [FIX 2026-07-06] Include media_url and msg_id in dedup key.
@@ -190,6 +200,8 @@ const AgentEngine = {
                 media_data: _mediaData,
                 file_info: _fileInfo,
                 msg_type: _msgType,
+                media_fs_path: _mediaFsPath,
+                file_name: _fileName,
                 // [FIX 2026-07-06] Pass chat_session_id from server relay so each
                 // "+" new chat gets its own isolated conversation history.
                 // Server (chat.go line 125, ws.go line 513) puts it in data.chat_session_id.
@@ -225,6 +237,12 @@ const AgentEngine = {
     };
 
     ws.onclose = () => {
+      // [FIX 2026-10-06] intentional close (superseded by a newer connectAgent)
+      // must not trigger the backoff reconnect chain below.
+      if (ws._intentionalClose) {
+        console.log(`[AgentEngine] Agent ${agentId} WS closed intentionally (hot-switch) — no reconnect`);
+        return;
+      }
       if (ws._pingInterval) clearInterval(ws._pingInterval);
       // [FIX 2026-08-30] 指数退避重连（风暴根因修复）：此前固定 3s 重试，token
       // 过期(TOKEN_INVALID)后永远失败 → 每 3-5s 一次的永久重连风暴。单 IP 每分
@@ -430,6 +448,11 @@ const AgentEngine = {
     // This lets vision-capable LLMs (GPT-4V, Qwen-VL, etc.) actually see the image
     // instead of just receiving "[Image]" as text.
     let userMessageContent = userMessage;
+    // [ADD 2026-10-06] media reference persisted with the user message so the
+    // chat replay can re-render image / file bubbles after a page refresh.
+    // Only METADATA is stored (FS path / url / name) — the bytes live in the
+    // IndexedDB virtual FS and are lazy-loaded by the replay renderer.
+    let _userMedia = null;
     const _isImageMsg = msg && (msg.msg_type === 'image' || (msg.media_data && msg.msg_type !== 'file'));
     if (_isImageMsg) {
       let imageUrl = '';
@@ -479,6 +502,33 @@ const AgentEngine = {
             _ATN.rememberImage(sessionId, _imgDataUrl);
             console.log('[AgentEngine] Image stored for analyze-image, len=' + _imgDataUrl.length);
           } catch (e) { console.warn('[AgentEngine] rememberImage failed:', e); }
+        }
+        // [ADD 2026-10-06] remember where the image bytes live so the chat
+        // replay can re-render the bubble (composer uploads pass media_fs_path;
+        // aicq-relayed images only have media_url).
+        _userMedia = {
+          kind: 'image',
+          path: (msg.media_fs_path || (msg.data && msg.data.media_fs_path) || ''),
+          url: (msg.media_url || (msg.data && msg.data.media_url) || ''),
+          name: (msg.file_name || (msg.data && msg.data.file_name) ||
+                 String(msg.media_fs_path || '').split('/').pop() || 'image')
+        };
+        // [ADD 2026-10-06] aicq 中继图的兜底持久化：这类图只有 media_url，且服务器
+        // 副本在 ingest 后即被删除——不落虚拟 FS 的话刷新后气泡无法重放、
+        // analyze-image 槽位也无源可注水。composer 直传图自带 media_fs_path，
+        // 不会进这个分支（不重复存储）。
+        if (_imgDataUrl && !_userMedia.path) {
+          try {
+            const _AS = (await import(_agUrl('agent-storage.js'))).default;
+            let _nm = String(_userMedia.name || 'image');
+            if (!/\.(png|jpe?g|gif|webp|bmp|svg)$/i.test(_nm)) _nm += '.png';
+            const _p = '/uploads/relay_' + Date.now() + '_' + _nm.replace(/[^\w.\-\u4e00-\u9fa5]+/g, '_');
+            const _imgResp = await fetch(_imgDataUrl);
+            const _imgBuf = await _imgResp.arrayBuffer();
+            const _saved = await _AS.saveFile(config.agent_id, _p, _imgBuf, true);
+            if (_saved !== false) { _userMedia.path = _p; _userMedia.name = _nm; }
+            console.log('[AgentEngine] relay image persisted to FS: ' + _p);
+          } catch (e) { console.warn('[AgentEngine] relay image FS persist failed:', e); }
         }
         // 2) 主模型 payload：BYOK 模型是否支持视觉由用户自选（vision 模型内联）。
         //    不支持视觉的模型会报错 → 用户可在设置里换模型，或让 agent 调 analyze-image 工具。
@@ -561,6 +611,9 @@ const AgentEngine = {
             (readTool ? ` Use the ${readTool} tool with filename="${filename}" to read its content.` : '') + `]`;
           userMessageContent = (userMessage || 'A file was uploaded.') + '\n' + fileNote;
           console.log(`[AgentEngine] File saved to VS: ${filename}, readTool=${readTool}`);
+          // [ADD 2026-10-06] the engine saved the bytes at FS root — keep the
+          // reference so the chat replay can re-render the attachment chip.
+          _userMedia = { kind: 'file', path: '/' + filename, name: filename, size: fileSize, mime: mimeType };
         } else {
           console.warn('[AgentEngine] File could not be saved to VS');
         }
@@ -641,7 +694,7 @@ const AgentEngine = {
     messages.push({ role: 'user', content: userMessageContent });
 
     // 保存用户消息
-    await AgentStorage.addConversation(config.agent_id, sessionId, 'user', userMessage);
+    await AgentStorage.addConversation(config.agent_id, sessionId, 'user', userMessage, null, null, _userMedia);
 
     // 4. 发送"正在思考"状态
     this._sendStreamChunk(config.agent_id, replyTarget, config, 'Calling LLM...', 'thinking');
@@ -658,6 +711,34 @@ const AgentEngine = {
       // [FIX 2026-08-30] const → let: 空回复降级重试路径需要重新赋值 llmResp
       // [2026-09-06] 经 _callLLMRetry 包装：429 限流 30s 起算指数退避，最多重试 5 次
       let llmResp = await this._callLLMRetry(messages, tools, toolsNL, config, sessionId, replyTarget);
+
+      // [FIX 2026-10-06] Image degrade retry — free text-only models reject
+      // multimodal image_url payloads with HTTP 400 ("免费模型带图直接 400").
+      // If the FIRST call fails with 400 and the newest user message carries an
+      // inline image, retry ONCE with the image replaced by a text placeholder
+      // plus a pointer to the analyze-image tool (which runs its own vision
+      // chain). Vision-capable models never hit this path — they get the image.
+      if (!llmResp.success && i === 0 && /\b400\b/.test(String(llmResp.error || ''))) {
+        const _last = messages[messages.length - 1];
+        if (_last && _last.role === 'user' && Array.isArray(_last.content) &&
+            _last.content.some(c => c.type === 'image_url')) {
+          const _flat = _last.content
+            .filter(c => c.type === 'text')
+            .map(c => c.text || '')
+            .join('\n') +
+            '\n[An image was attached but this model cannot view images inline. Call the analyze-image tool (no arguments) to actually see it, then answer the user.]';
+          console.warn('[AgentEngine] 400 with inline image — retrying with text placeholder + analyze-image hint');
+          const _retryMsgs = messages.slice();
+          _retryMsgs[_retryMsgs.length - 1] = { role: 'user', content: _flat };
+          const _retry = await this._callLLMRetry(_retryMsgs, tools, toolsNL, config, sessionId, replyTarget);
+          if (_retry.success) {
+            llmResp = _retry;
+            // persist the flattened form for the rest of the loop so later
+            // iterations do not re-send the rejected image block
+            messages[_retryMsgs.length - 1] = _retryMsgs[_retryMsgs.length - 1];
+          }
+        }
+      }
 
       if (!llmResp.success) {
         this._sendStreamChunk(config.agent_id, replyTarget, config, `[Error: ${llmResp.error}]`, 'text');
@@ -1152,6 +1233,14 @@ const AgentEngine = {
     }
 
     // 通过 aicq 服务器代理调 LLM（非 scnet 路径）
+    // [FIX 2026-10-04] per-model output cap: the platform /v1 rejects
+    // max_tokens above the API's own limit (400 "exceeds this API's limit",
+    // e.g. GLM-Z1-9B / Hunyuan-MT cap at 8192 while the engine budget is
+    // 16384). The bridge publishes the model's cap as llmConfig.__max_tokens
+    // (from /api/market maxTokens) — clamp to it when present, never exceed.
+    let _maxTok = 16384;
+    const _capTok = +llmConfig.__max_tokens || 0;
+    if (_capTok > 0 && _capTok < _maxTok) _maxTok = _capTok;
     const proxyBody = {
       target_url: llmConfig.base_url + '/chat/completions',
       method: 'POST',
@@ -1178,7 +1267,8 @@ const AgentEngine = {
         temperature: 0.8,
         // [FIX 2026-08-30] 4096 → 16384: nemotron 等 reasoning 模型的思考 token
         // 计入 max_tokens, 长对话+多工具轮次下 4096 被思考耗尽 → 正文为空
-        max_tokens: 16384
+        // [FIX 2026-10-04] clamped to the model's own cap (_maxTok above)
+        max_tokens: _maxTok
       }),
       stream: false
     };

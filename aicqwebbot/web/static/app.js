@@ -21,7 +21,12 @@
   const AGENT_ID_KEY = 'aicqwebbot_agent_id';
   const DEFAULT_TOOLS = ['web-search', 'web-read', 'url-read', 'save-memory', 'recall-memory',
     'task-plan', 'system-info', 'weather', 'qr-code', 'translate', 'exec-code',
-    'create-image', 'create-chart', 'read-clipboard', 'write-clipboard'];
+    'create-image', 'create-chart', 'read-clipboard', 'write-clipboard',
+  // [ADD 2026-10-06] FS / document readers — composer attachments land in the
+  // virtual FS and the agent needs these to actually read them
+  // (image → analyze-image is engine-side; pdf/doc/xlsx/bin → the readers below)
+    'read-file', 'list-dir', 'search-file', 'write-file', 'edit-file', 'delete-file',
+    'read-pdf', 'read-doc', 'read-xlsx'];
   let AGENT_VER = String(Date.now()); // cache-buster for local bundle
 
   function _agUrl(name) { return `/static/agent/${name}?v=${AGENT_VER}`; }
@@ -272,6 +277,46 @@
       const el = document.createElement('div');
       el.className = 'msg user';
       el.textContent = text;
+      $('msgFlow').appendChild(el);
+      this.scroll();
+    },
+
+    // [ADD 2026-10-06] user-side image / attachment bubble (composer pickers).
+    // d = { kind:'image'|'file', name, size, dataUrl, caption, onClick, title }.
+    // History replay reuses it with the bytes lazy-loaded from the virtual FS.
+    addUserMedia(d) {
+      const el = document.createElement('div');
+      el.className = 'msg user user-media';
+      if (d.kind === 'image' && d.dataUrl) {
+        const img = document.createElement('img');
+        img.className = 'chat-img';
+        img.src = d.dataUrl;
+        img.alt = d.name || 'image';
+        if (d.onClick) {
+          img.style.cursor = 'zoom-in';
+          img.title = d.title || d.name || '';
+          img.addEventListener('click', d.onClick);
+        }
+        el.appendChild(img);
+      } else {
+        const chip = document.createElement('div');
+        chip.className = 'file-chip';
+        const size = Number(d.size) || 0;
+        const sizeStr = size ? (size < 1024 ? size + ' B' : size < 1048576 ? (size / 1024).toFixed(1) + ' KB' : (size / 1048576).toFixed(1) + ' MB') : '';
+        chip.textContent = '📎 ' + (d.name || 'file') + (sizeStr ? ' · ' + sizeStr : '');
+        if (d.onClick) {
+          chip.style.cursor = 'pointer';
+          chip.title = d.title || d.name || '';
+          chip.addEventListener('click', d.onClick);
+        }
+        el.appendChild(chip);
+      }
+      if (d.caption) {
+        const cap = document.createElement('div');
+        cap.className = 'media-caption';
+        cap.textContent = d.caption;
+        el.appendChild(cap);
+      }
       $('msgFlow').appendChild(el);
       this.scroll();
     },
@@ -781,6 +826,105 @@
     });
   }
 
+  // ═══════════ [ADD 2026-10-06] Image / attachment upload ═══════════
+  // Files go STRAIGHT into IndexedDB and the agent is auto-messaged so it
+  // calls the matching analysis tool:
+  //   • image  → also saved to the virtual FS (/uploads/, persistent) here;
+  //     delivered as an image message (media_data data URI) — the engine
+  //     registers it for the analyze-image tool AND inline-feeds it to
+  //     vision-capable models, so the agent can actually SEE and analyze it.
+  //   • file   → delivered as a file message (file_info + media_data) — the
+  //     engine auto-saves it into the IndexedDB virtual FS and appends a
+  //     note telling the agent which reader to call (read-pdf / read-doc /
+  //     read-xlsx / read-file).
+  const MAX_MEDIA_BYTES = 12 * 1024 * 1024;   // 12 MB per file (base64 data URI)
+  function mimeFor(file) {
+    if (file.type) return file.type;
+    const ext = String(file.name).split('.').pop().toLowerCase();
+    return ({ png: 'image/png', jpg: 'image/jpeg', jpeg: 'image/jpeg', gif: 'image/gif',
+      webp: 'image/webp', svg: 'image/svg+xml', bmp: 'image/bmp', pdf: 'application/pdf',
+      txt: 'text/plain', md: 'text/markdown', csv: 'text/csv', json: 'application/json' })[ext]
+      || 'application/octet-stream';
+  }
+  async function sendLocalFile(file, isImage) {
+    if (!file) return;
+    if (!currentAgentId || !window.__localBus) { alert('Chat is not ready yet.'); return; }
+    if (file.size > MAX_MEDIA_BYTES) { alert((file.name || 'File') + ' is larger than 12 MB — please pick a smaller file.'); return; }
+    const buf = await file.arrayBuffer();
+    const dataUrl = await new Promise((res) => {
+      const fr = new FileReader();
+      fr.onload = () => res(String(fr.result));
+      fr.onerror = () => res('');
+      fr.readAsDataURL(new Blob([buf], { type: mimeFor(file) }));
+    });
+    if (!dataUrl) { alert('Could not read ' + (file.name || 'file')); return; }
+    const caption = $('inputBox').value.trim();
+    $('inputBox').value = '';
+    $('inputBox').style.height = 'auto';
+    const uid = 'm_' + Date.now() + '_' + Math.random().toString(36).slice(2, 6);
+    // deterministic FS path — handed to the engine via media_fs_path so the
+    // conversation record can reference the exact bytes and the chat replay
+    // can re-render the bubble after a page refresh.
+    const fsPath = isImage ? '/uploads/' + Date.now() + '_' + (file.name || 'image') : '';
+    UI.addUserMedia({ kind: isImage ? 'image' : 'file', name: file.name, size: file.size, dataUrl, caption });
+    if (isImage) {
+      // durable copy in the IndexedDB virtual FS (engine's image pipeline only
+      // keeps an in-memory slot for analyze-image — this persists it)
+      try {
+        const AgentStorage = (await import(_agUrl('agent-storage.js'))).default;
+        await AgentStorage.saveFile(currentAgentId, fsPath, buf, true);
+      } catch (e) { console.warn('[AicqWebBot] image FS save failed:', e); }
+    }
+    const fileInfo = isImage ? '' : JSON.stringify({ filename: file.name, size: file.size, mimeType: mimeFor(file) });
+    // engine drops messages with empty content — always give it a text part:
+    // the user's caption, or an explicit "analyze this" instruction
+    const text = caption || (isImage ? 'Please analyze this image.' : 'Please analyze this attachment.');
+    window.__localBus.deliver({
+      type: 'direct_message',
+      from: 'local_user',
+      to: currentAgentId,
+      content: text,
+      id: uid,
+      msgType: isImage ? 'image' : 'file',
+      media_data: dataUrl,
+      file_info: fileInfo,
+      media_fs_path: fsPath,
+      file_name: file.name || '',
+      chat_session_id: UI.cs,
+      data: {
+        from_id: 'local_user', to_id: currentAgentId,
+        content: text, id: uid, chat_session_id: UI.cs,
+        msgType: isImage ? 'image' : 'file',
+        media_data: dataUrl, file_info: fileInfo,
+        media_fs_path: fsPath, file_name: file.name || ''
+      }
+    });
+  }
+  async function handlePicked(e) {
+    const isImage = (e.target.id === 'fileImage');
+    const files = Array.from(e.target.files || []);
+    e.target.value = '';
+    for (const f of files) {
+      try { await sendLocalFile(f, isImage); }
+      catch (err) { console.error('[AicqWebBot] upload failed:', err); alert('Upload failed: ' + (err && err.message)); }
+    }
+  }
+
+  // [ADD 2026-10-06] open a virtual-FS file in the viewer (replayed media
+  // bubble / attachment chip click entry)
+  async function _openFSFile(path) {
+    try {
+      if (!document.getElementById('agent-styles')) {
+        const link = document.createElement('link');
+        link.id = 'agent-styles'; link.rel = 'stylesheet';
+        link.href = '/static/agent/agent-styles.css';
+        document.head.appendChild(link);
+      }
+      if (!window.openFileViewer) await import(_agUrl('agent-files.js'));
+      window.openFileViewer(currentAgentId, path.startsWith('/') ? path : '/' + path);
+    } catch (e) { console.warn('[AicqWebBot] open FS file failed:', e); }
+  }
+
   // ═══════════ 6. Wire up & boot ═══════════
 
   $('setupForm').addEventListener('submit', saveSetup);
@@ -796,6 +940,11 @@
     this.style.height = 'auto';
     this.style.height = Math.min(this.scrollHeight, 160) + 'px';
   });
+  // [ADD 2026-10-06] composer image / attachment pickers
+  $('btnImage').addEventListener('click', () => $('fileImage').click());
+  $('btnAttach').addEventListener('click', () => $('fileAttach').click());
+  $('fileImage').addEventListener('change', handlePicked);
+  $('fileAttach').addEventListener('change', handlePicked);
   $('btnNewSession').addEventListener('click', () => {
     UI.cs = 'cs_' + Date.now();
     $('csLabel').textContent = 'session ' + UI.cs.slice(3, 11);
@@ -918,6 +1067,7 @@
     $('msgFlow').innerHTML = '';
 
     const pending = {};   // tool_call_id → card（role:'tool' 记录回填结果用）
+    let _lastImg = null;  // [ADD 2026-10-06] 本会话最后一张可恢复图片 → analyze-image 槽位重注水
     const textOf = (c) => {
       if (typeof c === 'string') return c;
       if (Array.isArray(c)) return c.filter(p => p && p.type === 'text').map(p => p.text || '').join('\n');
@@ -926,6 +1076,43 @@
     for (const m of records) {
       if (!m || !m.role) continue;
       if (m.role === 'user') {
+        // [ADD 2026-10-06] 重放媒体气泡：会话记录带 media 元数据（图片/附件在虚拟
+        // FS 的路径），按需懒加载字节重渲染 —— 刷新后图片不再消失。
+        // 只存引用不存 base64，重放时从 /uploads/ 读回。
+        if (m.media && m.media.kind === 'image') {
+          try {
+            let dUrl = '';
+            if (m.media.path) {
+              const f = await AgentStorage.readFile(currentAgentId, m.media.path);
+              if (f && f.content) {
+                const blob = new Blob([f.content], { type: mimeFor({ name: m.media.path, type: '' }) });
+                dUrl = await new Promise(res => {
+                  const fr = new FileReader();
+                  fr.onload = () => res(String(fr.result));
+                  fr.onerror = () => res('');
+                  fr.readAsDataURL(blob);
+                });
+              }
+            }
+            if (!dUrl && m.media.url && String(m.media.url).startsWith('data:')) dUrl = m.media.url;
+            if (dUrl) {
+              UI.addUserMedia({
+                kind: 'image', name: m.media.name || 'image', dataUrl: dUrl,
+                title: m.media.path || '',
+                onClick: m.media.path ? () => _openFSFile(m.media.path) : null
+              });
+              _lastImg = { dataUrl: dUrl };
+            } else {
+              console.warn('[AicqWebBot] image bytes unavailable for replay:', m.media.path || m.media.url);
+            }
+          } catch (e) { console.warn('[AicqWebBot] image replay failed:', e); }
+        } else if (m.media && m.media.kind === 'file') {
+          UI.addUserMedia({
+            kind: 'file', name: m.media.name || 'file', size: m.media.size || 0,
+            title: m.media.path || '',
+            onClick: m.media.path ? () => _openFSFile(m.media.path) : null
+          });
+        }
         const t = textOf(m.content);
         if (t) UI.addUser(t);
       } else if (m.role === 'assistant') {
@@ -978,6 +1165,16 @@
         }
       }
     }
+    // [ADD 2026-10-06] analyze-image 槽位重注水：刷新后引擎内存图片槽清空，
+    // 用本会话最后一张可恢复的图片回填 —— 智能体免参调用 analyze-image
+    // 仍能看到最新图，跨刷新的图片分析链路闭环。
+    if (_lastImg && _lastImg.dataUrl) {
+      try {
+        const mod = await import(_agUrl('agent-tools-native.js'));
+        mod.default.rememberImage(sessionId, _lastImg.dataUrl);
+        console.log('[AicqWebBot] analyze-image slot rehydrated after refresh');
+      } catch (e) { console.warn('[AicqWebBot] image slot rehydrate failed:', e); }
+    }
     UI.scroll();
     console.log('[AicqWebBot] history session loaded:', sessionId, records.length, 'records');
   }
@@ -994,6 +1191,18 @@
       const AgentStorage = (await import(_agUrl('agent-storage.js'))).default;
       const id = localStorage.getItem(AGENT_ID_KEY);
       const cfg = id ? await AgentStorage.getConfig(id) : null;
+      // [ADD 2026-10-06] additive merge: stored agents keep their chosen tools,
+      // but the FS / document-reader tools introduced with composer uploads are
+      // added if missing (never removes custom picks) — otherwise attachments
+      // land in the virtual FS with no tool able to read them.
+      if (cfg && Array.isArray(cfg.tools)) {
+        const NEED = ['read-file', 'list-dir', 'search-file', 'write-file', 'edit-file', 'delete-file', 'read-pdf', 'read-doc', 'read-xlsx'];
+        const _missing = NEED.filter(t => cfg.tools.indexOf(t) === -1);
+        if (_missing.length) {
+          cfg.tools = cfg.tools.concat(_missing);
+          try { await AgentStorage.saveConfig(cfg.agent_id, cfg); } catch (e) {}
+        }
+      }
       if (cfg && cfg.llm_config) {
         await startChat(cfg);
         // [2026-09-06] 刷新后自动恢复最近会话（含工具卡片与结果重放）——

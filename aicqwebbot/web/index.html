@@ -6,7 +6,7 @@
 <title>AicqWebBot — Your browser is the agent's container</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🤖</text></svg>">
 <link rel="stylesheet" href="/static/agent/agent-styles.css?v=0.4.10">
-<link rel="stylesheet" href="/static/app.css?v=0.4.10">
+<link rel="stylesheet" href="/static/app.css?v=0.4.11">
 </head>
 <body>
 
@@ -108,12 +108,20 @@
   <main id="msgFlow"></main>
 
   <footer id="composer">
+    <!-- [ADD 2026-10-06] Image / attachment pickers.
+         Files go STRAIGHT into IndexedDB (agent virtual FS) and a message is
+         auto-sent so the agent calls the matching analysis tool:
+         image → analyze-image (vision) · pdf/doc/xlsx → read-pdf/read-doc/read-xlsx. -->
+    <button id="btnImage" title="Send image — saved to IndexedDB, the agent analyzes it">🖼️</button>
+    <button id="btnAttach" title="Send attachment — saved to IndexedDB, the agent analyzes it">📎</button>
     <textarea id="inputBox" rows="1" placeholder="Type a message... (Enter to send, Shift+Enter for newline)"></textarea>
     <button id="btnSend" title="Send">➤</button>
+    <input id="fileImage" type="file" accept="image/*" multiple hidden>
+    <input id="fileAttach" type="file" multiple hidden>
   </footer>
 </div>
 
-<!-- v=0.4.4 cache-buster: bump on every shell release so browsers never run a stale UI -->
-<script src="/static/app.js?v=0.4.10"></script>
+<!-- v=0.4.11 cache-buster: bump on every shell release so browsers never run a stale UI -->
+<script src="/static/app.js?v=0.4.11"></script>
 </body>
 </html>

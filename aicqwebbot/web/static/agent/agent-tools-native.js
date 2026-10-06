@@ -1245,7 +1245,7 @@ const AgentToolsNative = {
   async send_email(args, ctx) {
     // 通过 aicq 服务器代理发送（用户需要在设置里配 SMTP API）
     const config = ctx.agentConfig;
-    if (!config.smtp_api_url) return { success: false, error: 'SMTP API not configured. Set it in agent settings.' };
+    if (!config.smtp_api_url) return { success: false, error: "Outbound email needs an SMTP HTTP API. This platform only runs inbound verification mail (no SMTP out), so configure one in agent settings: smtp_api_url = your HTTP-to-email webhook (e.g. sendgrid/v3/mail/send or formsubmit.co endpoint) and smtp_api_key = its bearer token. The request is then relayed server-side through web-proxy (no CORS issues)." };
     const resp = await fetch('/api/v1/agent/web-proxy', {
       method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._authToken(ctx) },
       body: JSON.stringify({ url: config.smtp_api_url, mode: 'raw', method: 'POST',
@@ -1384,25 +1384,55 @@ const AgentToolsNative = {
   },
 
   // ── qr-code ──
-  // [FIX] 使用 api.qrserver.com API 生成二维码 — 不依赖外部 JS 库
+  // [FIX 2026-10-07] Primary path now generates the QR LOCALLY (canvas via the
+  // qrcode-generator CDN lib — same _loadScript pattern as docx/pdf-lib). The
+  // old api.qrserver.com path went through web-proxy whose JSON encoding
+  // mangles binary bytes (U+FFFD) and produced corrupt PNGs; it stays as a
+  // fallback using the NEW body_b64 binary channel (bot.go binary:true).
   async qr_code(args, ctx) {
     const size = args.size || 256;
+    const filename = `qr_${Date.now()}.png`;
+    try {
+      await this._loadScript('https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js');
+      if (typeof qrcode === 'function') {
+        const qr = qrcode(0, 'M');
+        qr.addData(String(args.data || ''));
+        qr.make();
+        const count = qr.getModuleCount();
+        const cell = Math.max(2, Math.floor(size / (count + 8)));
+        const dim = (count + 8) * cell;
+        const canvas = document.createElement('canvas');
+        canvas.width = dim; canvas.height = dim;
+        const c = canvas.getContext('2d');
+        c.fillStyle = '#FFFFFF';
+        c.fillRect(0, 0, dim, dim);
+        c.fillStyle = '#000000';
+        for (let r = 0; r < count; r++) {
+          for (let col = 0; col < count; col++) {
+            if (qr.isDark(r, col)) c.fillRect((col + 4) * cell, (r + 4) * cell, cell, cell);
+          }
+        }
+        const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
+        if (blob) {
+          await this._saveToVS(ctx, filename, blob);
+          await this._autoSendFile(ctx, filename, blob);
+          return { success: true, output: `QR code created: ${filename} (${dim}x${dim}px) and sent to user.`, files: [filename] };
+        }
+      }
+    } catch (e) { console.warn('[qr-code] local generation failed, falling back to relay:', e); }
     const url = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(args.data)}`;
     const resp = await fetch('/api/v1/agent/web-proxy', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._authToken(ctx) },
-      body: JSON.stringify({ url, mode: 'raw' })
+      body: JSON.stringify({ url, mode: 'raw', binary: true })
     });
     if (!resp.ok) return { success: false, error: 'QR code API failed: ' + resp.status };
-    const data = await resp.json();
-    if (!data.body) return { success: false, error: 'QR code API returned empty' };
-    // web-proxy returns binary data as a string — convert via charCode
-    // (atob fails because binary contains chars outside Latin1 range)
-    const str = data.body;
-    const bytes = new Uint8Array(str.length);
-    for (let i = 0; i < str.length; i++) bytes[i] = str.charCodeAt(i) & 0xFF;
+    const respData = await resp.json();
+    if (!respData.body_b64) return { success: false, error: 'QR code API returned empty' };
+    const bin = atob(respData.body_b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
     const blob = new Blob([bytes], { type: 'image/png' });
-    const filename = `qr_${Date.now()}.png`;
     await this._saveToVS(ctx, filename, blob);
     await this._autoSendFile(ctx, filename, blob);
     return { success: true, output: `QR code created: ${filename} and sent to user.`, files: [filename] };
@@ -1440,6 +1470,78 @@ const AgentToolsNative = {
     } catch(e) { console.warn('[download-file] Browser download failed:', e); }
     
     return { success: true, output: `Downloaded: ${filename} (${blob.size} bytes). The file has been saved to the virtual FS at ${args.path} and downloaded to the user device.` };
+  },
+
+  // ── git-clone ──
+  // [ADD 2026-10-07] 服务端 git 克隆中继（用户需求：apishare.cc 智能体支持像
+  // aicqwebbot 一样的 git 克隆服务）。浏览器没有 git 二进制，且
+  // codeload.github.com 不发 CORS 头，浏览器无法直接拉 tarball —— 由 Go 中继
+  // /api/v1/agent/git-clone 下载并解包后返回有界的文件清单，这里把每个文件
+  // 通过 AgentStorage.saveFiles（单事务批量）写进虚拟 FS 的
+  // /repos/{owner}/{repo}/{branch}/，用户在 📁 文件管理器里即可浏览/预览/
+  // 下载/删除整个仓库。克隆结果（图片等二进制经 base64）同样落 IndexedDB。
+  async git_clone(args, ctx) {
+    const repoUrl = String(args.url || '').trim();
+    if (!repoUrl) return { success: false, error: 'url is required (e.g. https://github.com/owner/repo)' };
+    let resp;
+    try {
+      resp = await fetch('/api/v1/agent/git-clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._authToken(ctx) },
+        body: JSON.stringify({ url: repoUrl, branch: String(args.branch || '') })
+      });
+    } catch (e) {
+      return { success: false, error: 'git-clone relay unreachable: ' + e.message };
+    }
+    let data;
+    try { data = await resp.json(); } catch (e) {
+      return { success: false, error: 'git-clone relay returned non-JSON (status ' + resp.status + ')' };
+    }
+    if (!resp.ok || !data.ok) {
+      return { success: false, error: data.detail || data.error || ('git-clone relay status ' + resp.status) };
+    }
+    // 目标根目录：/repos/{owner}/{repo}/{branch}（branch 中的 / 折叠成 -，
+    // 避免嵌套歧义）；args.path 可覆盖。
+    const m = repoUrl.match(/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)/);
+    const owner = m ? m[1] : 'github';
+    const repo = m ? m[2].replace(/\.git$/, '') : 'repo';
+    const branchSafe = String(data.branch || 'main').replace(/[^A-Za-z0-9._-]+/g, '-');
+    const root = args.path
+      ? ('/' + String(args.path).replace(/^\/+|\/+$/g, ''))
+      : '/repos/' + owner + '/' + repo + '/' + branchSafe;
+    const entries = [];
+    for (const f of (data.files || [])) {
+      if (!f || !f.path) continue;
+      let content;
+      if (f.encoding === 'base64') {
+        try {
+          const bin = atob(f.content);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          content = bytes.buffer;
+        } catch (e) { continue; }
+      } else {
+        content = f.content;
+      }
+      entries.push({ path: root + '/' + f.path, content });
+    }
+    if (!entries.length) {
+      return { success: false, error: 'relay returned ' + ((data.files || []).length) + ' files but none could be decoded' };
+    }
+    let saved = 0;
+    try {
+      const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+      saved = await AgentStorage.saveFiles(ctx.agentId, entries);
+    } catch (e) {
+      return { success: false, error: 'failed to write virtual FS: ' + e.message };
+    }
+    const kb = Math.max(1, Math.round((data.total_bytes || 0) / 1024));
+    const skipped = data.skipped_count ? ' ' + data.skipped_count + ' entries skipped (too large).' : '';
+    const trunc = data.truncated ? ' RESULT TRUNCATED — caps hit (file count or total size); ask for a narrower branch or read single files with url-read.' : '';
+    return {
+      success: true,
+      output: `Cloned github.com/${data.repo} (branch "${data.branch}") into the virtual FS at ${root} — ${saved} files, ${kb} KB.${skipped}${trunc} The repo is now visible in the file manager (folder icon) under ${root}; use read-file / list-dir / search-file on that path, binary files (images etc.) included.`
+    };
   },
 
   // ── upload-file ──

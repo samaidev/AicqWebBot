@@ -18,7 +18,12 @@
 import json
 import os
 import re
+import time
+import io as _io
+import tarfile
+import base64 as _b64
 from pathlib import Path
+from urllib.parse import quote as _urlquote
 
 import httpx
 from fastapi import FastAPI, Request
@@ -393,10 +398,137 @@ async def web_proxy(request: Request):
             resp = await c.request(method, url, content=body if method not in ("GET", "HEAD") else None)
         text = resp.text
         if mode == "raw":
-            return JSONResponse({"status": resp.status_code, "body": text[:20000]})
+            out = {"status": resp.status_code, "body": text[:20000]}
+            # [ADD 2026-10-07] binary:true → body_b64 (base64 of the raw bytes) —
+            # JSON text mangles non-UTF-8 bytes, binary payloads (PNG etc.) must
+            # be consumed from body_b64. Mirrors apishare.cc's Go web-proxy.
+            if payload.get("binary") and len(resp.content) <= 2 * 1024 * 1024:
+                out["body_b64"] = _b64.b64encode(resp.content).decode()
+            return JSONResponse(out)
         return JSONResponse({"status": resp.status_code, "body": text})
     except Exception as e:
         return JSONResponse({"error": f"fetch failure: {type(e).__name__}: {e}"}, status_code=502)
+
+
+# ═══════════════ 3b. Git clone relay ═══════════════
+# [ADD 2026-10-07] Mirrors apishare.cc's Go relay: the browser agent has no git
+# binary and codeload.github.com sends no CORS headers, so the relay downloads
+# the GitHub tarball, unpacks it in memory and returns a bounded manifest.
+# The agent's git-clone tool writes every file into the virtual FS (IndexedDB)
+# under /repos/{owner}/{repo}/{branch}/ — visible in the file manager (folder
+# button). Bounds: tarball 80MB, 2000 files, 1MB/text file, 384KB/binary,
+# 24MB total payload; per-IP 6 clones / 10 min.
+_gitclone_rate = {}
+
+
+@app.post("/api/v1/agent/git-clone")
+async def git_clone_proxy(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+    url = (payload.get("url") or "").strip()
+    branch = ((payload.get("branch") or "").strip())
+    m = re.match(r"^https?://(?:www\.)?github\.com/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?(?:/tree/([^/]+))?/?$", url)
+    if not m:
+        return JSONResponse({"error": "only github.com repository URLs are supported"}, status_code=400)
+    owner, repo, url_branch = m.group(1), m.group(2), m.group(3)
+    branch = branch or url_branch or ""
+    branch = branch.replace("refs/heads/", "").strip()
+    if any(ch in branch for ch in ("..", "?", "#")):
+        return JSONResponse({"error": "invalid branch name"}, status_code=400)
+
+    # per-IP fixed-window rate limit (6 / 10 min)
+    ip = request.client.host if request.client else "?"
+    now = time.time()
+    win = _gitclone_rate.get(ip)
+    if win is None or now - win[0] >= 600:
+        if len(_gitclone_rate) > 4096:
+            _gitclone_rate.clear()
+        _gitclone_rate[ip] = (now, 1)
+    elif win[1] >= 6:
+        return JSONResponse({"error": "rate limit: 6 clones per 10 minutes, try again later"}, status_code=429)
+    else:
+        _gitclone_rate[ip] = (win[0], win[1] + 1)
+
+    headers = {"User-Agent": UA}
+    if not branch:
+        try:
+            async with httpx.AsyncClient(timeout=20, headers=headers, follow_redirects=True) as c:
+                r = await c.get(f"https://api.github.com/repos/{owner}/{repo}")
+            if r.status_code == 200:
+                branch = (r.json() or {}).get("default_branch") or "main"
+        except Exception:
+            pass
+        branch = branch or "main"
+
+    raw = None
+    for tu in (f"https://codeload.github.com/{owner}/{repo}/tar.gz/refs/heads/{_urlquote(branch, safe='')}",
+               f"https://codeload.github.com/{owner}/{repo}/tar.gz/{_urlquote(branch, safe='')}"):
+        try:
+            async with httpx.AsyncClient(timeout=45, headers=headers, follow_redirects=True) as c:
+                r = await c.get(tu)
+        except Exception as e:
+            return JSONResponse({"error": f"github fetch failure: {type(e).__name__}: {e}"}, status_code=502)
+        if r.status_code == 200:
+            raw = r.content
+            break
+        if r.status_code == 404:
+            continue
+        return JSONResponse({"error": f"codeload returned {r.status_code}"}, status_code=502)
+    if raw is None:
+        return JSONResponse({"error": f"repository or branch not found: {owner}/{repo}@{branch}"}, status_code=404)
+    if len(raw) > 80 * 1024 * 1024:
+        return JSONResponse({"error": "tarball too large (>80MB)"}, status_code=413)
+
+    MAX_FILES, MAX_FILE, MAX_BIN, MAX_TOTAL = 2000, 1 << 20, 384 << 10, 24 << 20
+    files, skipped, skipped_count, total, truncated = [], [], 0, 0, False
+    try:
+        with tarfile.open(fileobj=_io.BytesIO(raw), mode="r:gz") as tf:
+            for member in tf:
+                if len(files) >= MAX_FILES:
+                    truncated = True
+                    break
+                if not member.isfile():
+                    continue
+                parts = member.name.split("/", 1)
+                rel = (parts[1] if len(parts) == 2 else "").replace("\\", "/")
+                if not rel or ".." in rel.split("/"):
+                    continue
+                if member.size > MAX_FILE:
+                    skipped_count += 1
+                    if len(skipped) < 40:
+                        skipped.append({"path": rel, "reason": "file too large (>1MB)"})
+                    continue
+                try:
+                    fobj = tf.extractfile(member)
+                    data = fobj.read() if fobj else b""
+                except Exception:
+                    continue
+                binary = b"\x00" in data[:8000]
+                if binary and member.size > MAX_BIN:
+                    skipped_count += 1
+                    if len(skipped) < 40:
+                        skipped.append({"path": rel, "reason": "binary file too large (>384KB)"})
+                    continue
+                if total + member.size > MAX_TOTAL:
+                    truncated = True
+                    break
+                files.append({
+                    "path": rel, "size": member.size, "binary": binary,
+                    "encoding": "base64" if binary else "utf8",
+                    "content": _b64.b64encode(data).decode() if binary else data.decode("utf-8", "replace"),
+                })
+                total += member.size
+    except tarfile.TarError as e:
+        return JSONResponse({"error": f"tar parse failure: {type(e).__name__}: {e}"}, status_code=502)
+    if not files:
+        return JSONResponse({"error": "clone produced no files (repository empty or unsupported ref)"}, status_code=502)
+    return JSONResponse({
+        "ok": True, "repo": f"{owner}/{repo}", "branch": branch,
+        "file_count": len(files), "total_bytes": total, "truncated": truncated,
+        "skipped_count": skipped_count, "skipped": skipped, "files": files,
+    })
 
 
 # ═══════════════ 4/5. Frontend static hosting ═══════════════

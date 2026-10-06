@@ -3,7 +3,7 @@
    ═════════════════════════════════════════════════════ */
 
 // Cache-buster version for dynamic imports — bump when agent modules change
-const _AGENT_VER = '20261006b';
+const _AGENT_VER = '20261007b';
 function _agUrl(name) { return `/static/agent/${name}?v=${_AGENT_VER}`; }
 
 const AgentEngine = {

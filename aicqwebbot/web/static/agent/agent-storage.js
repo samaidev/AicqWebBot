@@ -183,9 +183,66 @@ const AgentStorage = {
     return new Promise((resolve) => {
       const tx = this._db.transaction('agent_conversations', 'readwrite');
       tx.objectStore('agent_conversations').put(msg);
-      tx.oncomplete = () => resolve(msg);
+      // [ADD 2026-10-07] 每条消息落库后防抖重建 /chats/{session}.md —— 用户要求
+      // 聊天记录文件能在 📁 文件管理器里看到/管理。防抖 2.5s：一个任务几十条
+      // 工具结果只触发一次全量重建，不拖慢主链路（fire-and-forget）。
+      tx.oncomplete = () => { resolve(msg); try { this._scheduleTranscript(agentId, sessionId); } catch (e) {} };
       tx.onerror = () => resolve(null);
     });
+  },
+
+  // ═══ [ADD 2026-10-07] 聊天记录 → 虚拟 FS 文件（/chats/{sessionId}.md）═══
+  // 用户要求：聊天记录文件也要在文件管理器（📁）里可见、可预览、可下载、可删除。
+  // 实现策略：addConversation 每次写入后重置一个 2.5s 防抖定时器，空闲后把该
+  // 会话的完整历史（getConversations limit=0 = 全量）渲染成 markdown 一次写入。
+  // 注意：用户从文件管理器删掉该文件后，只要会话继续有新消息就会重新生成；
+  // 已结束会话的记录文件删除后保持删除状态。
+  _transcriptTimers: {},
+
+  _scheduleTranscript(agentId, sessionId) {
+    const key = agentId + '|' + sessionId;
+    try { clearTimeout(this._transcriptTimers[key]); } catch (e) {}
+    this._transcriptTimers[key] = setTimeout(() => {
+      try { delete this._transcriptTimers[key]; } catch (e) {}
+      this._writeTranscript(agentId, sessionId).catch(() => {});
+    }, 2500);
+  },
+
+  async _writeTranscript(agentId, sessionId) {
+    await this.init();
+    if (!this._db) return;
+    const msgs = await this.getConversations(agentId, sessionId, 0);
+    if (!msgs || !msgs.length) return;
+    const lines = [];
+    for (const m of msgs) {
+      const ts = String(m.created_at || '').slice(0, 19).replace('T', ' ');
+      if (m.role === 'user') {
+        lines.push('## 🧑 User — ' + ts + '\n\n' + String(m.content || '') + '\n');
+      } else if (m.role === 'assistant') {
+        const body = String(m.content || '');
+        let calls = '';
+        if (m.tool_calls && m.tool_calls.length) {
+          calls = m.tool_calls.map(tc => {
+            let argStr = '';
+            try { argStr = JSON.stringify(JSON.parse((tc.function && tc.function.arguments) || '{}')); } catch (e) { argStr = String((tc.function && tc.function.arguments) || ''); }
+            if (argStr.length > 300) argStr = argStr.slice(0, 300) + '…';
+            return '- 🔧 ' + ((tc.function && tc.function.name) || 'tool') + ' ' + argStr;
+          }).join('\n');
+        }
+        lines.push('## 🤖 Assistant — ' + ts + (body ? '\n\n' + body : '') + (calls ? '\n\n' + calls : '') + '\n');
+      } else if (m.role === 'tool') {
+        const t = String(m.content || '');
+        lines.push('> 🛠 tool result — ' + (t.length > 400 ? t.slice(0, 400) + '…' : t) + '\n');
+      }
+    }
+    const header = '# Chat transcript\n\n'
+      + '- Agent: ' + agentId + '\n'
+      + '- Session: ' + sessionId + '\n'
+      + '- Updated: ' + new Date().toISOString() + '\n'
+      + '- Records: ' + msgs.length + '\n\n---\n\n';
+    const md = header + lines.join('\n') + '\n';
+    const safeId = String(sessionId).replace(/[^A-Za-z0-9_-]/g, '_');
+    await this.saveFile(agentId, '/chats/' + safeId + '.md', md);
   },
 
   // [2026-09-06] 历史会话面板存储层：列出某 agent 的全部会话（按 session_id 聚合）。
@@ -492,6 +549,49 @@ const AgentStorage = {
       tx.objectStore('agent_files').put(file);
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => resolve(false);
+    });
+  },
+
+  // ═══ [ADD 2026-10-07] 批量写文件（git-clone 工具专用）═══
+  // saveFile 每次调用都要做一次 getFSSize（全表扫描）+ 单独事务；克隆一个仓库
+  // 动辄几百个文件，O(n²) 的扫描不可接受。这里一次性算容量、单个事务写全部。
+  // entries: [{ path, content (ArrayBuffer|Uint8Array|string), persistent? }]
+  // 返回成功写入的文件数。
+  async saveFiles(agentId, entries) {
+    await this.init();
+    if (!this._db || !entries || !entries.length) return 0;
+    const norm = [];
+    let total = 0;
+    const te = new TextEncoder();
+    for (const e of entries) {
+      if (!e || !e.path) continue;
+      let content = e.content;
+      if (typeof content === 'string') content = te.encode(content).buffer;
+      if (!content) continue;
+      const size = content.byteLength || content.length;
+      if (!size) continue;
+      total += size;
+      norm.push({ path: this._normalizePath(e.path), content, size });
+    }
+    if (!norm.length) return 0;
+    // 容量检查（一次）
+    const size = await this.getFSSize(agentId);
+    const MAX_FS = 800 * 1024 * 1024; // 800MB
+    if (size + total > MAX_FS) {
+      await this._cleanFS(agentId, total);
+    }
+    const now = Date.now();
+    return new Promise((resolve) => {
+      const tx = this._db.transaction('agent_files', 'readwrite');
+      const st = tx.objectStore('agent_files');
+      for (const f of norm) {
+        st.put({
+          path: f.path, agent_id: agentId, content: f.content, size: f.size,
+          last_accessed: now, persistent: !!f.persistent
+        });
+      }
+      tx.oncomplete = () => resolve(norm.length);
+      tx.onerror = () => resolve(0);
     });
   },
 

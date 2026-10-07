@@ -673,7 +673,7 @@ const AgentEngine = {
 
     // 2. 构建 tools — [2026-09-04] 提前构建：上下文占比计算要把工具注册算进去；
     //    喂给 LLM 的顺序为 系统提示词→工具注册→历史，全部静态前缀，可变内容只在最新部分（缓存命中）
-    const tools = AgentTools.toOpenAIFormat(config.tools);
+    const tools = AgentTools.toOpenAIFormat((config.tools && config.tools.length) ? config.tools : null);  // [FIX 2026-10-07 r12] empty/missing = all tools
     // [2026-09-03] analyze-image 内置强制注册 — 图片识别是基础能力，
     // 不受 per-agent 工具勾选影响（存量 agent 无需重新配置即可用）
     if (!tools.some(t => t.function && t.function.name === 'analyze-image')) {
@@ -2507,7 +2507,10 @@ const AgentEngine = {
   //   6. 下一轮加载自然 = 压缩交接日志 + 最近约10%历史。
   //   兜底：压缩 LLM 失败 → 本轮不压缩不丢数据，下轮重试。
 
-  // CJK 感知 token 估算：中文≈1字1token（保守宁高勿低），非CJK≈4字符1token
+  // CJK 感知 token 估算：中文≈0.75字1token，非CJK≈4字符1token。
+  // [FIX 2026-10-07 r12] 原先中文按 1字1token 严重高估（现代分词器中文实际
+  // ≈0.6-0.7 token/字），导致真实占用远未到 80% 就触发 cuttime 压缩交接。
+  // 0.75 仍略保守（宁高勿低防溢出），但已与真实值贴近。
   _estCtxTokens(text) {
     const s = String(text || '');
     let cjk = 0;
@@ -2516,7 +2519,7 @@ const AgentEngine = {
       if ((c >= 0x4E00 && c <= 0x9FFF) || (c >= 0x3000 && c <= 0x303F) || (c >= 0xFF00 && c <= 0xFFEF)) cjk++;
     }
     const other = s.length - cjk;
-    return cjk + Math.ceil(other / 4);
+    return Math.ceil(cjk * 0.75) + Math.ceil(other / 4);
   },
 
   _estCtxTokensMsgs(msgs) {
@@ -2531,26 +2534,35 @@ const AgentEngine = {
   },
 
   // 模型最大上下文 tokens：llm_config.max_context_tokens 显式配置优先 →
-  // 模型家族启发式 → 兜底 32768（免费模型常见窗口，偏保守=早压缩更安全）
+  // 模型家族启发式 → 兜底 65536。
+  // [FIX 2026-10-07 r12] 原表把 nemotron/mimo/muse-spark/qwen/llama 压到
+  // 32k、deepseek 压到 64k，全是过时值 —— 现代模型主流 128k 起步，分母
+  // 小了 4 倍导致真实占用远未到 80% 就提前触发压缩交接（cuttime）。
+  // 兜底 32768 → 65536；未知模型仍可在设置页显式填 Context window。
   _modelMaxContextTokens(llmConfig) {
     const c = llmConfig && (llmConfig.max_context_tokens || llmConfig.context_window);
     if (c && Number(c) > 0) return Number(c);
     const model = String((llmConfig && llmConfig.model) || '').toLowerCase();
     const table = [
+      [/gemini/, 1000000],
+      [/minimax/, 200000],
       [/claude/, 200000],
       [/gpt-5|gpt-4\.|gpt-4o/, 128000],
-      [/gemini/, 128000],
-      [/deepseek/, 64000],
-      [/glm|chatglm/, 128000],
-      [/kimi|moonshot/, 128000],
+      [/deepseek/, 131072],
+      [/glm|chatglm/, 131072],
+      [/kimi|moonshot/, 131072],
       [/grok/, 131072],
-      [/qwen/, 32768],
-      [/llama/, 32000],
-      [/nemotron/, 32768],
-      [/mimo|muse-spark/, 32768],
+      [/qwen/, 131072],
+      [/llama/, 131072],
+      [/nemotron/, 131072],
+      [/mimo|muse-spark/, 131072],
+      [/ling-?[\d.]|inclusionai/, 131072],
+      [/jev-/, 131072],
+      [/space-bunny/, 131072],
+      [/hunyuan|doubao|ernie|baichuan|mistral/, 131072],
     ];
     for (const [re, n] of table) if (re.test(model)) return n;
-    return 32768;
+    return 65536;
   },
 
   async _cutAndSumHistoryIfNeeded({ config, sessionId, sessionRow, history, sysContent, tools, userMessageContent }) {

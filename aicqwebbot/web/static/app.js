@@ -19,14 +19,8 @@
   // ── tiny helpers ──
   const $ = (id) => document.getElementById(id);
   const AGENT_ID_KEY = 'aicqwebbot_agent_id';
-  const DEFAULT_TOOLS = ['web-search', 'web-read', 'url-read', 'save-memory', 'recall-memory',
-    'task-plan', 'exec-code',
-    'create-image', 'create-chart', 'read-clipboard', 'write-clipboard',
-  // [ADD 2026-10-06] FS / document readers — composer attachments land in the
-  // virtual FS and the agent needs these to actually read them
-  // (image → analyze-image is engine-side; pdf/doc/xlsx/bin → the readers below)
-    'read-file', 'list-dir', 'search-file', 'write-file', 'edit-file', 'delete-file',
-    'read-pdf', 'read-doc', 'read-xlsx'];
+  // [FIX 2026-10-07 r12] DEFAULT_TOOLS removed — all tools are checked by
+  // default now (loadToolChips(null) → every chip on)
   let AGENT_VER = String(Date.now()); // cache-buster for local bundle
 
   function _agUrl(name) { return `/static/agent/${name}?v=${AGENT_VER}`; }
@@ -693,11 +687,13 @@
   async function loadToolChips(selected) {
     const mod = await import(_agUrl('agent-tools.js'));
     const all = (mod.default.ALL_TOOLS || []).map(t => t.name);
+    // [FIX 2026-10-07 r12] null/empty selection → ALL tools checked by default
+    const sel = (selected && selected.length) ? selected : all;
     const box = $('f_tools');
     box.innerHTML = '';
     all.forEach(name => {
       const chip = document.createElement('span');
-      chip.className = 'tool-chip' + (selected.includes(name) ? ' on' : '');
+      chip.className = 'tool-chip' + (sel.includes(name) ? ' on' : '');
       chip.textContent = name;
       chip.addEventListener('click', () => chip.classList.toggle('on'));
       chip.dataset.tool = name;
@@ -712,7 +708,7 @@
   async function showSetup(existing) {
     $('setupPanel').classList.remove('hidden');
     $('chatPanel').classList.add('hidden');
-    await loadToolChips(existing && existing.tools ? existing.tools : DEFAULT_TOOLS);
+    await loadToolChips(existing && existing.tools && existing.tools.length ? existing.tools : null);  // [FIX 2026-10-07 r12] default ALL
     const llmc = (existing && existing.llm_config) || {};
     const prov = llmc.provider || 'opencode';   // free models = zero-config default
     $('f_provider').value = (prov === 'openai') ? 'openai' : 'opencode';

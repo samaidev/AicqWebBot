@@ -5,7 +5,7 @@
 
 // [2026-09-29] 0.4.10 恢复 OpenCode Zen 免费供应商（仅限本独立包；本地中继=客户端 IP）。
 // wire 口径对齐 teambot free_model_hub v1.56.45，详见 agent-llm-providers.js 头注。
-const OCProviders = await import('/static/agent/agent-llm-providers.js?v=20260929a');
+const OCProviders = await import('/static/agent/agent-llm-providers.js?v=20261007a');
 
 // [2026-09-07] i18n helper — 宿主页面提供 t()（aicq.me 全量字典 / 独立壳 shim）。
 // 键缺失时回退到英文文案，保证英文用户不会再看到纯中文面板。
@@ -18,8 +18,8 @@ function _T(k, en) {
 }
 
 async function openSettings(agentId) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
-  const AgentTools = (await import('/static/agent/agent-tools.js?v=20260904b')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20261007a')).default;
+  const AgentTools = (await import('/static/agent/agent-tools.js?v=20261007a')).default;
   const config = await AgentStorage.getConfig(agentId);
   if (!config) { toast('Agent config not found', 'error'); return; }
   // [2026-09-29] 0.4.9 曾把遗留 opencode 配置迁移为 openai —— 0.4.10 供应商恢复后
@@ -35,7 +35,7 @@ async function openSettings(agentId) {
   }
 
   const allTools = AgentTools.getToolList();
-  const enabledTools = new Set(config.tools || []);
+  const enabledTools = new Set((config.tools && config.tools.length) ? config.tools : allTools.map(t => t.name));  // [FIX 2026-10-07 r12] empty/missing = ALL checked by default
 
   // 创建 modal
   let modal = document.getElementById('agentSettingsModal');
@@ -80,6 +80,11 @@ async function openSettings(agentId) {
           </select>
         </div>
         <div id="settingsLlmFields"></div>
+        <div class="form-group" style="margin-top:10px">
+          <label>${_T('ag_max_context','Context window (tokens, optional)')}</label>
+          <input type="number" id="settingsMaxContext" min="4096" step="1024" value="${config.llm_config?.max_context_tokens||''}" placeholder="${_T('ag_max_context_ph','empty = auto by model family')}">
+          <div style="font-size:11px;color:var(--text-muted,#999);margin-top:4px">${_T('ag_max_context_hint','Real context window of your model — controls when history compression (cuttime) triggers at the 80% threshold. Leave empty to auto-detect by model name.')}</div>
+        </div>
         <div class="btn-row" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn-action" onclick="saveSettings('${agentId}','llm')">${t('ag_save')}</button>
           <button class="btn-secondary" onclick="testLLMConnection('${agentId}')" id="testLlmBtn">${t('ag_test_btn')}</button>
@@ -237,7 +242,7 @@ function updateSettingsLlmUI(existingConfig) {
 }
 
 async function saveSettings(agentId, tab) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20261007a')).default;
   const config = await AgentStorage.getConfig(agentId);
   if (!config) return;
 
@@ -271,6 +276,11 @@ async function saveSettings(agentId, tab) {
       const compatCheckbox = document.getElementById('settingsCompatMode');
       config.llm_config.compat_mode = compatCheckbox ? compatCheckbox.checked : false;
     }
+    // [ADD 2026-10-07 r12] explicit context window override — feeds
+    // AgentEngine._modelMaxContextTokens for the 80% compression trigger
+    const _mcEl = document.getElementById('settingsMaxContext');
+    const _mc = _mcEl ? parseInt(_mcEl.value, 10) : 0;
+    if (_mc && _mc >= 4096) config.llm_config.max_context_tokens = _mc;
   } else if (tab === 'tools') {
     config.tools = Array.from(document.querySelectorAll('#settingsToolsList input:checked')).map(c => c.value);
   }
@@ -559,7 +569,7 @@ async function clawhubSearch() {
 
 async function installClawhubSkill(slug) {
   const agentId = document.getElementById('agentSettingsModal').querySelector('.btn-action').getAttribute('onclick')?.match(/'([^']+)'/)?.[1] || '';
-  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20261007a')).default;
 
   try {
     // 获取 skill 详情
@@ -583,7 +593,7 @@ async function installClawhubSkill(slug) {
 }
 
 async function loadInstalledSkills(agentId) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20261007a')).default;
   const skills = await AgentStorage.getSkills(agentId);
   const el = document.getElementById('installedSkills');
   if (!el) return;
@@ -598,7 +608,7 @@ async function loadInstalledSkills(agentId) {
 }
 
 async function uninstallClawhubSkill(agentId, slug) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20261007a')).default;
   await AgentStorage.removeSkill(agentId, slug);
   toast(_T('ag_skill_uninstalled','Skill uninstalled'), 'success');
   loadInstalledSkills(agentId);
@@ -606,7 +616,7 @@ async function uninstallClawhubSkill(agentId, slug) {
 
 // ─── 数据导出/导入/删除 ───
 async function exportAgentData(agentId) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20261007a')).default;
   const data = await AgentStorage.exportAgent(agentId);
   if (!data) { toast(_T('ag_no_data','No data to export'), 'error'); return; }
   const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
@@ -620,7 +630,7 @@ async function exportAgentData(agentId) {
 async function importAgentData(agentId, event) {
   const file = event.target.files[0];
   if (!file) return;
-  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20261007a')).default;
   const text = await file.text();
   const data = JSON.parse(text);
   await AgentStorage.importAgent(data);
@@ -629,7 +639,7 @@ async function importAgentData(agentId, event) {
 
 async function deleteAgent(agentId) {
   if (!confirm(t('ag_delete_confirm') || 'Are you sure? All data will be deleted, including friend relationship and owner binding on the server.')) return;
-  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20260904b')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=20261007a')).default;
   const config = await AgentStorage.getConfig(agentId);
   // Close WS
   if (window.AgentEngine?._agentWS?.[agentId]) {
@@ -736,7 +746,7 @@ async function refreshLlmLog() {
   const summary = document.getElementById('llmLogSummary');
   if (!wrap) return;
   try {
-    const LLMLog = (await import('/static/agent/agent-llm-log.js?v=20260904b')).default;
+    const LLMLog = (await import('/static/agent/agent-llm-log.js?v=20261007a')).default;
     _llmLogRows = LLMLog.list();
   } catch (e) {
     wrap.innerHTML = '<p style="color:red;font-size:12px">' + _T('ag_log_module_failed','Log module load failed: ') + _llmEsc(e.message) + '</p>';
@@ -783,7 +793,7 @@ async function refreshLlmLog() {
 
 async function clearLlmLog() {
   if (!confirm(_T('ag_log_clear_confirm','Clear all LLM call logs?'))) return;
-  const LLMLog = (await import('/static/agent/agent-llm-log.js?v=20260904b')).default;
+  const LLMLog = (await import('/static/agent/agent-llm-log.js?v=20261007a')).default;
   LLMLog.clear();
   refreshLlmLog();
 }

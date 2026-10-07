@@ -2300,7 +2300,7 @@ const AgentToolsNative = {
     const isOC = (llmConfig.provider === 'opencode');
     let OC = null;
     if (isOC) {
-      try { OC = (await import('/static/agent/agent-llm-providers.js?v=20260929a')).default; } catch (e) { OC = null; }
+      try { OC = (await import('/static/agent/agent-llm-providers.js?v=20261007a')).default; } catch (e) { OC = null; }
       if (!OC) return { success: false, error: 'opencode provider module unavailable' };
     }
     const isResponses = !isOC && (llmConfig.api_type === 'openai-response' || llmConfig.api_type === 'response');

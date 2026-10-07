@@ -1046,6 +1046,20 @@ const AgentEngine = {
       break;
     }
 
+    // [ADD 2026-10-08 round-cap-notice, synced from apishare 692ebff]
+    // exhausting all maxIterations rounds used to end the loop SILENTLY —
+    // the UI flipped back to idle with no final answer and no hint that the
+    // task was truncated. Detection: the transcript ends on a tool round (a
+    // normal completion always ends on the final assistant reply).
+    const _lastLoopMsg = messages[messages.length - 1];
+    const _cappedByRounds = !this._stopHit(config.agent_id, sessionId) && !this._epochStale() &&
+      _lastLoopMsg && (_lastLoopMsg.role === 'tool' ||
+        (_lastLoopMsg.role === 'assistant' && _lastLoopMsg.tool_calls && _lastLoopMsg.tool_calls.length));
+    if (_cappedByRounds) {
+      this._sendStreamChunk(config.agent_id, replyTarget, config,
+        '(Reached the ' + maxIterations + '-round working limit for one message — the task may be incomplete. Send "continue" and I will pick up where I left off.)', 'text');
+    }
+
     // 6. 发送 stream_end
     this._sendStreamEnd(config.agent_id, replyTarget, config);
   },

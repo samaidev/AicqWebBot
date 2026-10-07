@@ -3,6 +3,12 @@
    也支持直接 eval (更快但无沙箱隔离)
    ════════════════════════════════════════════════════════ */
 
+// [ADD 2026-10-07 r19] cache-buster for ALL dynamic agent-module imports
+// (synced from apishare b4caac0) — bare URLs hit the browser's long static
+// cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
+// with agent-engine.js._AGENT_VER.
+const _AGENT_VER = '20261007h';
+
 const AgentSandboxJS = {
   _quickJS: null,
   _loading: null,
@@ -57,7 +63,7 @@ const AgentSandboxJS = {
 
   async _executeLocked(args, ctx) {
     // 先恢复虚拟文件系统到全局变量
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const fsData = {};
     const files = await AgentStorage.listFiles(ctx.agentId, '/');
     for (const f of files) {
@@ -121,7 +127,7 @@ const AgentSandboxJS = {
         await AgentStorage.saveFile(ctx.agentId, path, content);
         if (_htmlEmitted < 3 && typeof content === 'string' && /\.html?$/i.test(path)) {
           try {
-            const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js');
+            const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js?v=' + _AGENT_VER);
             const bytes = new TextEncoder().encode(content);
             let bin = '';
             for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);

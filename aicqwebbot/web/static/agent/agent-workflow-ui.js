@@ -3,8 +3,14 @@
    功能：创建/编辑/删除/运行工作流，查看运行记录
    ═══════════════════════════════════════════════════════════ */
 
+// [ADD 2026-10-07 r19] cache-buster for ALL dynamic agent-module imports
+// (synced from apishare b4caac0) — bare URLs hit the browser's long static
+// cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
+// with agent-engine.js._AGENT_VER.
+const _AGENT_VER = '20261007h';
+
 async function openWorkflowManager(agentId) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
   const config = await AgentStorage.getConfig(agentId);
   if (!config) { toast('Agent not found', 'error'); return; }
 

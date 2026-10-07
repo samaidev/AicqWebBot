@@ -2,6 +2,12 @@
    Pyodide 懒加载管理 — 首次 exec-code 时才加载 (~10MB)
    ═══════════════════════════════════════════════════════════ */
 
+// [ADD 2026-10-07 r19] cache-buster for ALL dynamic agent-module imports
+// (synced from apishare b4caac0) — bare URLs hit the browser's long static
+// cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
+// with agent-engine.js._AGENT_VER.
+const _AGENT_VER = '20261007h';
+
 const AgentSandboxPython = {
   _pyodide: null,
   _loading: null,
@@ -191,7 +197,7 @@ _pxur.urlopen = _px_urlopen
   },
 
   async _executeLocked(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     let pyodide;
     try {
       pyodide = await this.getPyodide();
@@ -273,7 +279,7 @@ _pxur.urlopen = _px_urlopen
           const bytes = new Uint8Array(rec.content);
           let bin = '';
           for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
-          const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js');
+          const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js?v=' + _AGENT_VER);
           AgentToolsNative._emitFileChunk(ctx, p.split('/').pop(), 'text/html', `data:text/html;base64,${btoa(bin)}`, bytes.length);
           emitted++;
         }
@@ -301,7 +307,7 @@ _pxur.urlopen = _px_urlopen
   async _saveFS(agentId) {
     if (!this._pyodide) return;
     try {
-      const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+      const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
       // [FIX 2026-10-07 repos-writes, synced from apishare 09874d1] walk
       // /home AND /repos. /repos/* holds git-cloned repos materialized into
       // MEMFS by _restoreFS; sandbox code (and LLM agents editing cloned
@@ -335,7 +341,7 @@ _pxur.urlopen = _px_urlopen
   async _restoreFS(agentId) {
     if (!this._pyodide) return;
     try {
-      const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+      const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
       const files = await AgentStorage.listFiles(agentId, '/');
       for (const f of files) {
         const file = await AgentStorage.readFile(agentId, f.path);

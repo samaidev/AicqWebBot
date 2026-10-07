@@ -3,6 +3,12 @@
    功能：浏览/打开/下载/删除/上传 虚拟FS文件 + Key查看
    ═════════════════════════════════════════════════════ */
 
+// [ADD 2026-10-07 r19] cache-buster for ALL dynamic agent-module imports
+// (synced from apishare b4caac0) — bare URLs hit the browser's long static
+// cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
+// with agent-engine.js._AGENT_VER.
+const _AGENT_VER = '20261007h';
+
 // [2026-09-07] i18n helper — 宿主页面提供 t()（aicq.me 全量字典 / 独立壳 shim）。
 // 键缺失时回退到英文文案，保证英文用户不会再看到纯中文面板。
 function _T(k, en) {
@@ -14,7 +20,7 @@ function _T(k, en) {
 }
 
 async function openFileManager(agentId) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
   const config = await AgentStorage.getConfig(agentId);
   if (!config) { toast('Agent not found', 'error'); return; }
 
@@ -38,7 +44,7 @@ async function openFileManager(agentId) {
 }
 
 async function renderFileList(agentId, currentDir) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
   const modal = document.getElementById('fileManagerModal');
   if (!modal) return;
 
@@ -178,7 +184,7 @@ function _fileIcon(ext) {
 
 // ─── 打开/预览文件 ───
 async function openFileViewer(agentId, path) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
   const file = await AgentStorage.readFile(agentId, path);
   if (!file) { toast(_T('ag_fs_not_found','File not found'), 'error'); return; }
 
@@ -286,7 +292,7 @@ window._openHtmlInNewTab = function() {
 
 // ─── 下载文件 ───
 async function downloadFromAgentFS(agentId, path) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
   const file = await AgentStorage.readFile(agentId, path);
   if (!file) { toast(_T('ag_fs_not_found','File not found'), 'error'); return; }
   const blob = new Blob([file.content]);
@@ -301,7 +307,7 @@ async function downloadFromAgentFS(agentId, path) {
 // ─── 删除文件 ───
 async function deleteFromAgentFS(agentId, path, filename) {
   if (!confirm(_T('ag_fs_del_confirm','Delete {name}?').replace('{name}', filename))) return;
-  const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
   await AgentStorage.deleteFile(agentId, path);
   toast(_T('ag_fs_deleted','Deleted: ') + filename, 'success');
   // 刷新当前目录
@@ -317,7 +323,7 @@ async function uploadToAgentFS(agentId, destDir) {
     const file = e.target.files[0];
     if (!file) return;
     const buf = await file.arrayBuffer();
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const destPath = (destDir === '/' ? '' : destDir) + '/' + file.name;
     await AgentStorage.saveFile(agentId, destPath, buf);
     toast(_T('ag_fs_uploaded','Uploaded: {name} ({kb}KB)').replace('{name}', file.name).replace('{kb}', (file.size/1024).toFixed(1)), 'success');
@@ -328,7 +334,7 @@ async function uploadToAgentFS(agentId, destDir) {
 
 // ─── Key 查看 ───
 async function showAgentKeys(agentId) {
-  const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+  const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
   const config = await AgentStorage.getConfig(agentId);
   if (!config) return;
 

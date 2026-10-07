@@ -2,6 +2,12 @@
    30个浏览器原生工具实现 — 被 agent-engine.js 按需调用
    ═════════════════════════════════════════════════════════ */
 
+// [ADD 2026-10-07 r19] cache-buster for ALL dynamic agent-module imports
+// (synced from apishare b4caac0) — bare URLs hit the browser's long static
+// cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
+// with agent-engine.js._AGENT_VER.
+const _AGENT_VER = '20261007h';
+
 const AgentToolsNative = {
   // [C4] Get auth token for proxy calls
   _authToken(ctx) {
@@ -131,14 +137,14 @@ const AgentToolsNative = {
 
   // ── save-memory ──
   async save_memory(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const mem = await AgentStorage.saveMemory(ctx.agentId, args.key, args.content, args.summary || args.content.slice(0,200), args.importance || 0.5, ctx.sessionId);
     return { success: true, output: 'Memory saved.' };
   },
 
   // ── recall-memory ──
   async recall_memory(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const results = await AgentStorage.searchMemory(ctx.agentId, args.query, args.limit || 10);
     if (!results.length) return { success: true, output: 'No matching memories found.' };
     const text = results.map((m,i) => `${i+1}. [${m.key}] ${m.summary||m.content.slice(0,200)}`).join('\n');
@@ -152,7 +158,7 @@ const AgentToolsNative = {
     // [FIX] Default filename if not provided
     if (!args.filename) args.filename = `document_${Date.now()}.docx`;
     await this._loadScript('https://cdn.jsdelivr.net/npm/docx@8.5.0/build/index.umd.js');
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     // [FIX] Handle content as array, object, or string
     let elements;
     if (Array.isArray(args.content)) {
@@ -313,7 +319,7 @@ const AgentToolsNative = {
 
   // ── read-doc ──
   async read_doc(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const file = await AgentStorage.readFile(ctx.agentId, args.filename);
     if (!file) return { success: false, error: 'File not found' };
     await this._loadScript('https://cdn.jsdelivr.net/npm/mammoth@1.6.0/mammoth.browser.min.js');
@@ -419,7 +425,7 @@ const AgentToolsNative = {
 
   // ── read-pdf ──
   async read_pdf(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const file = await AgentStorage.readFile(ctx.agentId, args.filename);
     if (!file) return { success: false, error: 'File not found' };
     await this._loadScript('https://cdn.jsdelivr.net/npm/pdfjs-dist@3.11.174/build/pdf.min.js');
@@ -693,7 +699,7 @@ const AgentToolsNative = {
   async edit_xlsx(args, ctx) {
     await this._loadScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
     await this._loadScript('https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js');
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const file = await AgentStorage.readFile(ctx.agentId, args.filename);
     if (!file) return { success: false, error: 'File not found: ' + args.filename };
 
@@ -867,7 +873,7 @@ const AgentToolsNative = {
 
   // ── read-xlsx ──
   async read_xlsx(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const file = await AgentStorage.readFile(ctx.agentId, args.filename);
     if (!file) return { success: false, error: 'File not found' };
     await this._loadScript('https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js');
@@ -887,7 +893,7 @@ const AgentToolsNative = {
     // [FIX] Default filename if not provided
     if (!args.filename) args.filename = `presentation_${Date.now()}.pptx`;
     await this._loadScript('https://cdn.jsdelivr.net/npm/pptxgenjs@3.12.0/dist/pptxgen.bundle.js');
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     // pptxgenjs bundle 注册的是 PptxGenJS（大写），不是 pptxgen
     const PptxGen = window.PptxGenJS || window.pptxgen;
     if (!PptxGen) return { success: false, error: 'Failed to load pptxgenjs library' };
@@ -1236,7 +1242,7 @@ const AgentToolsNative = {
     
     // If file_path is specified, send a file message
     if (args.file_path) {
-      const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+      const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
       const file = await AgentStorage.readFile(ctx.agentId, args.file_path);
       if (!file) return { success: false, error: 'File not found: ' + args.file_path };
       
@@ -1286,7 +1292,7 @@ const AgentToolsNative = {
 
   // ── task-plan ──
   async task_plan(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const planKey = `task_plan_${ctx.agentId}_${ctx.sessionId}`;
     if (args.action === 'create') {
       await AgentStorage.saveToKV(planKey, { plan: args.plan, created: Date.now(), tasks: args.plan.split('\n').filter(l => l.trim()).map((t, i) => ({ text: t, done: false })) });
@@ -1345,7 +1351,7 @@ const AgentToolsNative = {
   // Downloads a file from virtual FS to the user's device
   // In headless/PWA mode, triggers browser download
   async download_file(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const file = await AgentStorage.readFile(ctx.agentId, args.path);
     if (!file) return { success: false, error: 'File not found' };
     const blob = new Blob([file.content]);
@@ -1421,8 +1427,17 @@ const AgentToolsNative = {
     }
     let saved = 0;
     try {
-      const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
-      saved = await AgentStorage.saveFiles(ctx.agentId, entries);
+      const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
+      // [FIX 2026-10-07 r19, synced from apishare b4caac0] degrade to
+      // per-file writes when a stale agent-storage.js (without saveFiles)
+      // somehow got cached, instead of failing an otherwise complete clone.
+      if (typeof AgentStorage.saveFiles === 'function') {
+        saved = await AgentStorage.saveFiles(ctx.agentId, entries);
+      } else {
+        for (const en of entries) {
+          try { await AgentStorage.saveFile(ctx.agentId, en.path, en.content, true); saved++; } catch (e2) {}
+        }
+      }
     } catch (e) {
       return { success: false, error: 'failed to write virtual FS: ' + e.message };
     }
@@ -1442,7 +1457,7 @@ const AgentToolsNative = {
   async git_pull(args, ctx) {
     const repoUrl = String(args.url || '').trim();
     if (!repoUrl) return { success: false, error: 'url is required (e.g. https://github.com/owner/repo)' };
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     let resp;
     try {
       resp = await fetch('/api/v1/agent/git-clone', {
@@ -1523,7 +1538,7 @@ const AgentToolsNative = {
   // token 只存本浏览器 IndexedDB 的 agent 配置，服务器不落盘、仅用于本次
   // api.github.com 调用。
   async git_push(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const cfg = (await AgentStorage.getConfig(ctx.agentId)) || {};
     let token = String(args.token || '').trim() || String(cfg.github_token || '').trim();
     if (!token) {
@@ -1637,7 +1652,7 @@ const AgentToolsNative = {
         if (!file) { done({ success: false, error: 'No file selected' }); return; }
         try {
           const buf = await file.arrayBuffer();
-          const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+          const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
           await AgentStorage.saveFile(ctx.agentId, args.dest_path, buf);
           done({ success: true, output: `File uploaded to ${args.dest_path} (${file.size} bytes)` });
         } catch (err) { done({ success: false, error: 'Upload failed: ' + err.message }); }
@@ -1808,7 +1823,7 @@ const AgentToolsNative = {
 
           // (1) 从 VS 读取
           if (args.file_path) {
-            const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+            const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
             const f = await AgentStorage.readFile(ctx.agentId, args.file_path);
             if (!f) return { success: false, error: `File not found in agent FS: ${args.file_path}` };
             const blob = new Blob([f.content], { type: mimeFor(filename) });
@@ -1871,7 +1886,7 @@ const AgentToolsNative = {
         }
         // ── List files in agent virtual FS ──
         case 'list_files': {
-          const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+          const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
           const files = await AgentStorage.listFiles(ctx.agentId, args.dir || '/');
           const list = (files || []).map(f => `${f.path} (${f.size||0} bytes)`).join('\n');
           return { success: true, output: list || 'No files in agent FS', results: files };
@@ -2009,7 +2024,7 @@ const AgentToolsNative = {
   },
 
   async _saveToVS(ctx, filename, blob) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const buf = await blob.arrayBuffer();
     await AgentStorage.saveFile(ctx.agentId, '/' + filename, buf);
   },
@@ -2164,7 +2179,7 @@ const AgentToolsNative = {
     if (!Number.isFinite(topN) || topN <= 0) topN = 10;
     topN = Math.min(50, topN);
 
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const matches = await AgentStorage.searchSessionHistory(ctx.agentId, sessionId, keyword, topN);
     if (!matches || matches.length === 0) {
       return { success: true, output: `No history records matching "${keyword}" in session ${sessionId}. Try a different keyword (shorter, or in the other language).`, count: 0 };

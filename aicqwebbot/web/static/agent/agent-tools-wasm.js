@@ -2,6 +2,12 @@
    WASM 虚拟文件系统工具 — edit-file, read-file, write-file 等
    ═══════════════════════════════════════════════════════ */
 
+// [ADD 2026-10-07 r19] cache-buster for ALL dynamic agent-module imports
+// (synced from apishare b4caac0) — bare URLs hit the browser's long static
+// cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
+// with agent-engine.js._AGENT_VER.
+const _AGENT_VER = '20261007h';
+
 const AgentToolsWasm = {
   async execute(toolName, args, ctx) {
     const handler = this[toolName.replace(/-/g, '_')];
@@ -11,7 +17,7 @@ const AgentToolsWasm = {
   },
 
   async edit_file(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     if (args.action === 'read') return this.read_file(args, ctx);
     if (args.action === 'write') return this.write_file({ path: args.path, content: args.content }, ctx);
     if (args.action === 'append') {
@@ -24,7 +30,7 @@ const AgentToolsWasm = {
   },
 
   async read_file(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const file = await AgentStorage.readFile(ctx.agentId, args.path);
     if (!file) return { success: false, error: `File not found: ${args.path}` };
     const text = new TextDecoder().decode(file.content);
@@ -32,7 +38,7 @@ const AgentToolsWasm = {
   },
 
   async write_file(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     await AgentStorage.saveFile(ctx.agentId, args.path, args.content);
     // [ADD 2026-09-07 v0.4.8] HTML 产物自动投递到聊天（独立壳）：用户让智能体"做个网页/
     // 可视化页面"时，写完 .html 聊天里应立刻出现渲染预览卡 —— aicq.me 全量前端本就有
@@ -40,7 +46,7 @@ const AgentToolsWasm = {
     // 仅投递 .html/.htm 交付物；.py/.csv/.json 等中间产物留在文件管理器，避免刷屏。
     if (/\.html?$/i.test(String(args.path || ''))) {
       try {
-        const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js');
+        const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js?v=' + _AGENT_VER);
         const text = String(args.content ?? '');
         const bytes = new TextEncoder().encode(text);
         let bin = '';
@@ -53,7 +59,7 @@ const AgentToolsWasm = {
   },
 
   async list_dir(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const files = await AgentStorage.listFiles(ctx.agentId, args.path || '/');
     if (!files.length) return { success: true, output: 'Empty directory.' };
     const text = files.map(f => `${f.path} (${f.size} bytes)`).join('\n');
@@ -61,13 +67,13 @@ const AgentToolsWasm = {
   },
 
   async delete_file(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     await AgentStorage.deleteFile(ctx.agentId, args.path);
     return { success: true, output: `File deleted: ${args.path}` };
   },
 
   async search_file(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const files = await AgentStorage.listFiles(ctx.agentId, args.dir || '/');
     const pattern = args.pattern.replace(/\*/g, '.*').replace(/\?/g, '.');
     const regex = new RegExp(pattern);
@@ -76,7 +82,7 @@ const AgentToolsWasm = {
   },
 
   async file_diff(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const f1 = await AgentStorage.readFile(ctx.agentId, args.file1);
     const f2 = await AgentStorage.readFile(ctx.agentId, args.file2);
     if (!f1) return { success: false, error: `File not found: ${args.file1}` };
@@ -96,7 +102,7 @@ const AgentToolsWasm = {
 
   async install_package(args, ctx) {
     // 通过 Pyodide micropip 安装
-    const { AgentSandboxPython } = await import('/static/agent/agent-sandbox-python.js');
+    const { AgentSandboxPython } = await import('/static/agent/agent-sandbox-python.js?v=' + _AGENT_VER);
     return AgentSandboxPython.installPackage(args.package, ctx);
   },
 

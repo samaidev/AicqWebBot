@@ -3,10 +3,16 @@
    功能：CRUD + 步骤执行 + 模板变量 + 定时触发
    ═══════════════════════════════════════════════════════ */
 
+// [ADD 2026-10-07 r19] cache-buster for ALL dynamic agent-module imports
+// (synced from apishare b4caac0) — bare URLs hit the browser's long static
+// cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
+// with agent-engine.js._AGENT_VER.
+const _AGENT_VER = '20261007h';
+
 const AgentWorkflow = {
   // ─── CRUD ───
   async list(agentId) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const workflows = await AgentStorage.getFromKV(`workflows_${agentId}`) || [];
     return workflows;
   },
@@ -17,7 +23,7 @@ const AgentWorkflow = {
   },
 
   async create(agentId, data) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const list = await this.list(agentId);
     const wf = {
       id: `wf_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
@@ -40,7 +46,7 @@ const AgentWorkflow = {
   },
 
   async update(agentId, workflowId, updates) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const list = await this.list(agentId);
     const idx = list.findIndex(w => w.id === workflowId);
     if (idx === -1) return null;
@@ -50,7 +56,7 @@ const AgentWorkflow = {
   },
 
   async delete(agentId, workflowId) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const list = await this.list(agentId);
     const filtered = list.filter(w => w.id !== workflowId);
     await AgentStorage.saveToKV(`workflows_${agentId}`, filtered);
@@ -121,7 +127,7 @@ const AgentWorkflow = {
   },
 
   async _saveRun(agentId, run) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const runs = await AgentStorage.getFromKV(`workflow_runs_${agentId}`) || [];
     runs.unshift(run);
     if (runs.length > 50) runs.length = 50; // 保留最近50条
@@ -129,7 +135,7 @@ const AgentWorkflow = {
   },
 
   async listRuns(agentId, workflowId, limit = 20) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const runs = await AgentStorage.getFromKV(`workflow_runs_${agentId}`) || [];
     let filtered = workflowId ? runs.filter(r => r.workflow_id === workflowId) : runs;
     return filtered.slice(0, limit);
@@ -220,7 +226,7 @@ const AgentWorkflow = {
     const skillName = params.name;
     if (!skillName) throw new Error('skill step requires "name" parameter');
 
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const config = await AgentStorage.getConfig(agentId);
     if (!config) throw new Error('Agent config not found');
 
@@ -238,16 +244,16 @@ const AgentWorkflow = {
     const category = AgentTools._getCategory(skillName);
 
     if (category === 'wasm') {
-      const { AgentToolsWasm } = await import('/static/agent/agent-tools-wasm.js');
+      const { AgentToolsWasm } = await import('/static/agent/agent-tools-wasm.js?v=' + _AGENT_VER);
       return await AgentToolsWasm.execute(skillName, skillArgs, ctx);
     } else {
-      const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js');
+      const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js?v=' + _AGENT_VER);
       return await AgentToolsNative.execute(skillName, skillArgs, ctx);
     }
   },
 
   async _stepCode(params, context, agentId) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const config = await AgentStorage.getConfig(agentId);
     const sandboxType = config?.sandbox_type || 'javascript';
 
@@ -255,16 +261,16 @@ const AgentWorkflow = {
     const ctx = { agentId, sessionId: 'workflow', ws: window.AgentEngine?._agentWS?.[agentId], agentConfig: config };
 
     if (sandboxType === 'python') {
-      const { AgentSandboxPython } = await import('/static/agent/agent-sandbox-python.js');
+      const { AgentSandboxPython } = await import('/static/agent/agent-sandbox-python.js?v=' + _AGENT_VER);
       return await AgentSandboxPython.execute(args, ctx);
     } else {
-      const { AgentSandboxJS } = await import('/static/agent/agent-sandbox-js.js');
+      const { AgentSandboxJS } = await import('/static/agent/agent-sandbox-js.js?v=' + _AGENT_VER);
       return await AgentSandboxJS.execute(args, ctx);
     }
   },
 
   async _stepLLM(params, context, agentId) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const config = await AgentStorage.getConfig(agentId);
     if (!config) throw new Error('Agent config not found');
 
@@ -318,7 +324,7 @@ const AgentWorkflow = {
   },
 
   async _stepSendMessage(params, context, agentId) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const config = await AgentStorage.getConfig(agentId);
     // [FIX 2026-09-04] 缺省目标从"agent 自己"（会被引擎忽略，消息黑洞）改为"主人账号"；
     // 两者都拿不到时明确报错，而不是静默发给自己

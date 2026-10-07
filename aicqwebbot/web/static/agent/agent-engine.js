@@ -1338,7 +1338,8 @@ const AgentEngine = {
     // e.g. GLM-Z1-9B / Hunyuan-MT cap at 8192 while the engine budget is
     // 16384). The bridge publishes the model's cap as llmConfig.__max_tokens
     // (from /api/market maxTokens) — clamp to it when present, never exceed.
-    let _maxTok = 16384;
+    // [2026-10-07 r14] 默认最大输出 tokens 20000（设置页 Max output tokens 字段），模型上限仍然钳制
+    let _maxTok = (+llmConfig.max_tokens > 0) ? +llmConfig.max_tokens : 20000;
     const _capTok = +llmConfig.__max_tokens || 0;
     if (_capTok > 0 && _capTok < _maxTok) _maxTok = _capTok;
     const proxyBody = {
@@ -1364,7 +1365,7 @@ const AgentEngine = {
         messages: messages,
         tools: tools.length > 0 ? tools : undefined,
         stream: false,
-        temperature: 0.8,
+        temperature: (typeof llmConfig.temperature === 'number' && llmConfig.temperature >= 0) ? llmConfig.temperature : 1,
         // [FIX 2026-08-30] 4096 → 16384: nemotron 等 reasoning 模型的思考 token
         // 计入 max_tokens, 长对话+多工具轮次下 4096 被思考耗尽 → 正文为空
         // [FIX 2026-10-04] clamped to the model's own cap (_maxTok above)
@@ -1897,9 +1898,9 @@ const AgentEngine = {
         model: llmConfig.model,
         messages: messages,
         stream: true,                    // [2026-09-29] 恒流式（非流式一律 FreeTierError）
-        temperature: 0.8,
+        temperature: (typeof llmConfig.temperature === 'number' && llmConfig.temperature >= 0) ? llmConfig.temperature : 1,
         // [FIX 2026-08-30] 16384: nemotron 等 reasoning 模型的思考 token 计入 max_tokens
-        max_tokens: 16384,
+        max_tokens: (+llmConfig.max_tokens > 0) ? +llmConfig.max_tokens : 16384,
         stream_options: { include_usage: true }
       };
       // 真实工具 + 指纹诱饵（chat 格式；混合形态 teambot 已验证）
@@ -2562,7 +2563,8 @@ const AgentEngine = {
       [/hunyuan|doubao|ernie|baichuan|mistral/, 131072],
     ];
     for (const [re, n] of table) if (re.test(model)) return n;
-    return 65536;
+    // [2026-10-07 r14] 未知模型兜底 200k（设置页 Context window 默认 200k 同口径）
+    return 200000;
   },
 
   async _cutAndSumHistoryIfNeeded({ config, sessionId, sessionRow, history, sysContent, tools, userMessageContent }) {

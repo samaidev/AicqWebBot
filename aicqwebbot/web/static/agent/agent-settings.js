@@ -70,20 +70,31 @@ async function openSettings(agentId) {
         <div class="form-group">
           <label>${t('ag_provider_label')}</label>
           <select id="settingsLlmProvider" onchange="updateSettingsLlmUI()">
+            <option value="apishare" ${!config.llm_config?.provider||config.llm_config?.provider==='apishare'?'selected':''}>Apishare.cc</option>
             <!-- [2026-09-29] OpenCode Zen 免费供应商排在第一位（与 0.4.8 前一致） -->
             <option value="opencode" ${config.llm_config?.provider==='opencode'?'selected':''}>${t('ag_provider_opencode')}</option>
-            <option value="scnet" ${config.llm_config?.provider==='scnet'?'selected':''}>${t('ag_provider_scnet')}</option>
             <option value="chat-accumulation" ${config.llm_config?.provider==='chat-accumulation'?'selected':''}>${t('ag_provider_accum')}</option>
             <option value="deepseek" ${config.llm_config?.provider==='deepseek'?'selected':''}>DeepSeek</option>
-            <option value="openai" ${config.llm_config?.provider==='openai'?'selected':''}>OpenAI</option>
+            <option value="openai" ${config.llm_config?.provider==='openai'?'selected':''}>OpenAI-compatible</option>
             <option value="custom" ${config.llm_config?.provider==='custom'?'selected':''}>${t('ag_provider_custom')}</option>
           </select>
         </div>
         <div id="settingsLlmFields"></div>
         <div class="form-group" style="margin-top:10px">
-          <label>${_T('ag_max_context','Context window (tokens, optional)')}</label>
-          <input type="number" id="settingsMaxContext" min="4096" step="1024" value="${config.llm_config?.max_context_tokens||''}" placeholder="${_T('ag_max_context_ph','empty = auto by model family')}">
-          <div style="font-size:11px;color:var(--text-muted,#999);margin-top:4px">${_T('ag_max_context_hint','Real context window of your model — controls when history compression (cuttime) triggers at the 80% threshold. Leave empty to auto-detect by model name.')}</div>
+          <label>${_T('ag_max_context','Context window (k tokens)')}</label>
+          <div style="display:flex;align-items:center;gap:6px">
+            <input type="number" id="settingsMaxContextK" min="4" step="1" value="${config.llm_config?.max_context_tokens ? Math.round(config.llm_config.max_context_tokens/1000) : 200}" style="flex:1">
+            <span style="font-size:12px;color:var(--text-muted,#999)">k</span>
+          </div>
+          <div style="font-size:11px;color:var(--text-muted,#999);margin-top:4px">${_T('ag_max_context_hint','Compression (cuttime) triggers at 80% of this window — default 200k.')}</div>
+        </div>
+        <div class="form-group" style="margin-top:10px">
+          <label>${_T('ag_max_tokens','Max output tokens')}</label>
+          <input type="number" id="settingsMaxTokens" min="256" step="256" value="${config.llm_config?.max_tokens||20000}">
+        </div>
+        <div class="form-group" style="margin-top:10px">
+          <label>${_T('ag_temperature','Temperature')}</label>
+          <input type="number" id="settingsTemp" min="0" max="2" step="0.1" value="${config.llm_config?.temperature ?? 1}">
         </div>
         <div class="btn-row" style="margin-top:12px;display:flex;gap:8px;flex-wrap:wrap">
           <button class="btn-action" onclick="saveSettings('${agentId}','llm')">${t('ag_save')}</button>
@@ -168,12 +179,35 @@ function switchSettingsTab(tab) {
   if (tab === 'llmlog') refreshLlmLog();
 }
 
+// [2026-10-07 r14] API Key 标签超链接化：默认 provider 直接链到官方取 key 页
+function _apiKeyLabelHtml(provider) {
+  const links = {
+    'apishare': 'https://apishare.cc',
+    'opencode': 'https://opencode.ai/zen',
+    'deepseek': 'https://platform.deepseek.com/api_keys',
+    'openai': 'https://platform.openai.com/api_keys'
+  };
+  const text = (typeof t === 'function' && t('ag_api_key') !== 'ag_api_key') ? t('ag_api_key') : 'API Key';
+  const url = links[provider];
+  return url ? `<a href="${url}" target="_blank" rel="noopener" style="color:#0066cc;text-decoration:underline">${text}</a>` : text;
+}
+
 function updateSettingsLlmUI(existingConfig) {
   const provider = document.getElementById('settingsLlmProvider').value;
   const fields = document.getElementById('settingsLlmFields');
   const cfg = existingConfig || {};
 
-  if (provider === 'opencode') {
+  if (provider === 'apishare') {
+    // [2026-10-07 r14] Apishare.cc 官方 OpenAI 兼容中继 —— 默认 provider
+    const baseUrl = cfg.base_url || 'https://apishare.cc/v1';
+    fields.innerHTML = `
+      <div class="form-group"><label>${_T('ag_base_url','Base URL')}</label><input type="text" id="settingsBaseUrl" value="${baseUrl}" placeholder="https://apishare.cc/v1"></div>
+      <div class="form-group"><label>${_T('ag_model','Model')}</label><input type="text" id="settingsModel" value="${cfg.model||'Agnes/agnes-3.0-flash:free'}" placeholder="Agnes/agnes-3.0-flash:free"></div>
+      <div class="form-group"><label><a href="https://apishare.cc" target="_blank" rel="noopener" style="color:#0066cc;text-decoration:underline">${_T('ag_api_key','API Key')}</a> (${_T('ag_key_optional','optional — free models work without a key')})</label><input type="password" id="settingsApiKey" value="${cfg.api_key||''}" placeholder=""></div>
+      <div class="form-group" style="padding:8px;background:#eef9ee;border-radius:6px;border:1px solid #bfe3bf;font-size:11px;color:#1a7a1a">
+        ${_T('ag_apishare_note','Apishare.cc relay — OpenAI-compatible endpoint at /v1. Default model Agnes/agnes-3.0-flash:free; get an API key at apishare.cc if needed.')}
+      </div>`;
+  } else if (provider === 'opencode') {
     // [2026-08-28] OpenCode Zen — 匿名免费 LLM
     // [2026-09-29] 恢复：一次性列出全部模型（free 优先），API 类型按模型 ID 自动推导
     fields.innerHTML = `
@@ -187,25 +221,14 @@ function updateSettingsLlmUI(existingConfig) {
         <input type="text" id="settingsOcModelCustom" value="" placeholder="e.g. nemotron-3.5-lightning-free" oninput="updateOpenCodeCustomModelUI('settings')">
       </div>
       <div class="form-group">
-        <label>${t('ag_api_key')} (Optional)</label>
+        <label>${_apiKeyLabelHtml('opencode')} (Optional)</label>
         <input type="password" id="settingsOcApiKey" value="${cfg.api_key||''}" placeholder="${t('ag_opencode_key_hint')}">
       </div>
+      <div class="form-group" style="font-size:11px;color:var(--text-muted,#999)">Base URL: <code>https://opencode.ai/zen/v1</code></div>
       <div class="form-group" style="padding:8px;background:#eef9ee;border-radius:6px;border:1px solid #bfe3bf;font-size:11px;color:#1a7a1a">
         ${t('ag_opencode_free_note')}
       </div>`;
     window.updateOpenCodeModelOptions('settings', cfg.model || '');
-  } else if (provider === 'scnet') {
-    fields.innerHTML = `
-      <div class="form-group"><label>${t('ag_scnet_cookie')}</label><textarea id="settingsScnetCookie" rows="3">${cfg.cookie||''}</textarea></div>
-      <div class="form-group"><label>${t('ag_model_id')}</label>
-        <select id="settingsScnetModel">
-          <option value="520" ${cfg.model_id==520?'selected':''}>DeepSeek-V4-Flash</option>
-          <option value="510" ${cfg.model_id==510?'selected':''}>DeepSeek-V4-Pro</option>
-          <option value="17" ${cfg.model_id==17?'selected':''}>Qwen3-30B</option>
-          <option value="120" ${cfg.model_id==120?'selected':''}>Qwen3-235B</option>
-          <option value="410" ${cfg.model_id==410?'selected':''}>MiniMax-M2.5</option>
-        </select>
-      </div>`;
   } else if (provider === 'chat-accumulation') {
     const baseUrl = cfg.base_url || '';
     fields.innerHTML = `
@@ -217,9 +240,10 @@ function updateSettingsLlmUI(existingConfig) {
       </div>`;
   } else {
     const baseUrl = cfg.base_url || (provider==='deepseek'?'https://api.deepseek.com/v1':provider==='openai'?'https://api.openai.com/v1':'');
+    // [2026-10-07 r14] base URL 对所有 provider 可见可改；API Key 标签链接官方取 key 页
     fields.innerHTML = `
-      ${provider==='custom' ? `<div class="form-group"><label>${t('ag_base_url')}</label><input type="text" id="settingsBaseUrl" value="${baseUrl}" placeholder="${t('ag_base_url_ph')}"></div>` : ''}
-      <div class="form-group"><label>${t('ag_api_key')}</label><input type="password" id="settingsApiKey" value="${cfg.api_key||''}"></div>
+      <div class="form-group"><label>${t('ag_base_url')}</label><input type="text" id="settingsBaseUrl" value="${baseUrl}" placeholder="${t('ag_base_url_ph')}"></div>
+      <div class="form-group"><label>${_apiKeyLabelHtml(provider)}</label><input type="password" id="settingsApiKey" value="${cfg.api_key||''}"></div>
       <div class="form-group"><label>${t('ag_model')}</label><input type="text" id="settingsModel" value="${cfg.model||''}" placeholder="${t('ag_model_ph')}"></div>
       ${(provider==='openai'||provider==='custom') ? `
       <!-- [2026-09-06] API 协议选择：Chat Completions / Responses（gpt-5.x 等新模型推荐 Responses） -->
@@ -251,14 +275,16 @@ async function saveSettings(agentId, tab) {
   } else if (tab === 'llm') {
     const provider = document.getElementById('settingsLlmProvider').value;
     config.llm_config = { provider };
-    if (provider === 'opencode') {
+    if (provider === 'apishare') {
+      config.llm_config.base_url = document.getElementById('settingsBaseUrl')?.value.trim() || 'https://apishare.cc/v1';
+      config.llm_config.model = document.getElementById('settingsModel')?.value.trim() || 'Agnes/agnes-3.0-flash:free';
+      config.llm_config.api_key = document.getElementById('settingsApiKey')?.value.trim() || '';
+      config.llm_config.api_type = 'openai-completion';
+    } else if (provider === 'opencode') {
       // [2026-08-28] OpenCode Zen 免费匿名 LLM（API Key 可选）[2026-09-29 恢复]
       const oc = OCProviders.default.collectOpenCodeConfig('settings');
       if (oc.error) { toast(t(oc.error), 'error'); return; }
       Object.assign(config.llm_config, oc);
-    } else if (provider === 'scnet') {
-      config.llm_config.cookie = document.getElementById('settingsScnetCookie').value;
-      config.llm_config.model_id = parseInt(document.getElementById('settingsScnetModel').value);
     } else if (provider === 'chat-accumulation') {
       config.llm_config.api_key = document.getElementById('settingsApiKey').value;
       config.llm_config.model = document.getElementById('settingsModel').value;
@@ -267,20 +293,23 @@ async function saveSettings(agentId, tab) {
     } else {
       config.llm_config.api_key = document.getElementById('settingsApiKey').value;
       config.llm_config.model = document.getElementById('settingsModel').value;
-      config.llm_config.base_url = provider==='deepseek' ? 'https://api.deepseek.com/v1' :
-        provider==='openai' ? 'https://api.openai.com/v1' :
-        document.getElementById('settingsBaseUrl')?.value || '';
+      config.llm_config.base_url = document.getElementById('settingsBaseUrl')?.value.trim() ||
+        (provider==='deepseek' ? 'https://api.deepseek.com/v1' : provider==='openai' ? 'https://api.openai.com/v1' : '');
       // [2026-09-06] API 协议（openai/custom 显示下拉；deepseek 无下拉时归位 chat）
       config.llm_config.api_type = document.getElementById('settingsApiType')?.value || 'openai-completion';
       // 兼容模式开关
       const compatCheckbox = document.getElementById('settingsCompatMode');
       config.llm_config.compat_mode = compatCheckbox ? compatCheckbox.checked : false;
     }
-    // [ADD 2026-10-07 r12] explicit context window override — feeds
-    // AgentEngine._modelMaxContextTokens for the 80% compression trigger
-    const _mcEl = document.getElementById('settingsMaxContext');
-    const _mc = _mcEl ? parseInt(_mcEl.value, 10) : 0;
-    if (_mc && _mc >= 4096) config.llm_config.max_context_tokens = _mc;
+    // [2026-10-07 r14] context window in k units (default 200k) + temperature (default 1)
+    // + max output tokens (default 20000) — feeds AgentEngine._modelMaxContextTokens
+    // (80% cuttime trigger) and the LLM request body.
+    const _mcK = parseInt(document.getElementById('settingsMaxContextK')?.value, 10);
+    if (_mcK && _mcK >= 4) config.llm_config.max_context_tokens = _mcK * 1000;
+    const _mt = parseInt(document.getElementById('settingsMaxTokens')?.value, 10);
+    if (_mt && _mt >= 256) config.llm_config.max_tokens = _mt;
+    const _tp = parseFloat(document.getElementById('settingsTemp')?.value);
+    if (!isNaN(_tp) && _tp >= 0) config.llm_config.temperature = _tp;
   } else if (tab === 'tools') {
     config.tools = Array.from(document.querySelectorAll('#settingsToolsList input:checked')).map(c => c.value);
   }
@@ -300,18 +329,18 @@ async function testLLMConnection(agentId) {
   // 收集当前 tab 的配置（不依赖 saveSettings）
   const provider = document.getElementById('settingsLlmProvider').value;
   let llmConfig = { provider };
-  if (provider === 'opencode') {
+  if (provider === 'apishare') {
+    llmConfig.base_url = document.getElementById('settingsBaseUrl')?.value.trim() || 'https://apishare.cc/v1';
+    llmConfig.model = document.getElementById('settingsModel')?.value.trim() || 'Agnes/agnes-3.0-flash:free';
+    llmConfig.api_key = document.getElementById('settingsApiKey')?.value.trim() || '';
+    llmConfig.api_type = 'openai-completion';
+    if (!llmConfig.model) { resultEl.innerHTML = '<span style="color:#c00">' + t('ag_fill_model_name') + '</span>'; return; }
+    if (!llmConfig.base_url) { resultEl.innerHTML = '<span style="color:#c00">' + t('ag_fill_baseurl') + '</span>'; return; }
+  } else if (provider === 'opencode') {
     // [2026-08-28] OpenCode Zen — 独立测试路径（支持两种 API 类型 + 匿名无 Key）[2026-09-29 恢复]
     const oc = OCProviders.default.collectOpenCodeConfig('settings');
     if (oc.error) { resultEl.innerHTML = '<span style="color:#c00">❌ ' + t(oc.error) + '</span>'; return; }
     Object.assign(llmConfig, oc);
-  } else if (provider === 'scnet') {
-    llmConfig.cookie = document.getElementById('settingsScnetCookie')?.value.trim() || '';
-    llmConfig.model_id = parseInt(document.getElementById('settingsScnetModel')?.value || '520');
-    if (!llmConfig.cookie) {
-      resultEl.innerHTML = '<span style="color:#c00">' + t('ag_fill_cookie') + '</span>';
-      return;
-    }
   } else if (provider === 'chat-accumulation') {
     llmConfig.api_key = document.getElementById('settingsApiKey')?.value.trim() || '';
     llmConfig.model = document.getElementById('settingsModel')?.value.trim() || '';
@@ -322,9 +351,8 @@ async function testLLMConnection(agentId) {
   } else {
     llmConfig.api_key = document.getElementById('settingsApiKey')?.value.trim() || '';
     llmConfig.model = document.getElementById('settingsModel')?.value.trim() || '';
-    if (provider === 'deepseek') llmConfig.base_url = 'https://api.deepseek.com/v1';
-    else if (provider === 'openai') llmConfig.base_url = 'https://api.openai.com/v1';
-    else llmConfig.base_url = document.getElementById('settingsBaseUrl')?.value.trim() || '';
+    llmConfig.base_url = document.getElementById('settingsBaseUrl')?.value.trim() ||
+      (provider === 'deepseek' ? 'https://api.deepseek.com/v1' : provider === 'openai' ? 'https://api.openai.com/v1' : '');
     // [2026-09-06] API 协议（与聊天路径一致）
     llmConfig.api_type = document.getElementById('settingsApiType')?.value || 'openai-completion';
     // 读取兼容模式开关
@@ -363,27 +391,7 @@ async function testLLMConnection(agentId) {
     }
 
     // 构建测试请求 — 发送一个最小的 ping 消息
-    const proxyBody = provider === 'scnet' ? {
-      target_url: 'https://www.scnet.cn/acx/chatbot/v1/chat/completion',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Cookie': llmConfig.cookie,
-        'Accept': 'text/event-stream',
-        'Origin': 'https://www.scnet.cn',
-        'Referer': 'https://www.scnet.cn/ui/chatbot/test',
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0'
-      },
-      body: JSON.stringify({
-        // scnet API 要求 conversationId 是数字 long，不能是字符串
-        conversationId: Date.now(),
-        content: 'ping',
-        thinkingEnable: false, onlineEnable: false,
-        modelId: llmConfig.model_id || 520,
-        textFile: [], imageFile: [], autoRun: 0, clusterId: ''
-      }),
-      stream: true
-    } : provider === 'chat-accumulation' ? {
+    const proxyBody = provider === 'chat-accumulation' ? {
       // chat-accumulation 测试: 用标准 OpenAI 格式发 ping
       // session_id 在测试时不用（测试只验证连通性）
       target_url: llmConfig.base_url + '/chat/completions',
@@ -460,47 +468,14 @@ async function testLLMConnection(agentId) {
       return;
     }
 
-    // 测试通过后，如果非兼容模式且非 scnet/chat-accumulation，提示 tools 风险
-    const compatNote = (!llmConfig.compat_mode && provider !== 'scnet' && provider !== 'chat-accumulation')
+    // 测试通过后，如果非兼容模式且非 chat-accumulation，提示 tools 风险
+    const compatNote = (!llmConfig.compat_mode && provider !== 'chat-accumulation')
       ? `<div style="margin-top:8px;font-size:11px;color:var(--text-muted,#999);padding:6px 8px;background:#fff3cd;border-radius:4px">${t('ag_compat_note')}</div>`
       : '';
 
     // 解析响应内容
-    if (provider === 'scnet') {
-      // scnet 返回 SSE 流，检查是否能拿到任何 contentType=1001 的内容
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = '';
-      let gotContent = false;
-      let errMsg = '';
-      const deadline = Date.now() + 30000;  // 30s timeout
-      while (Date.now() < deadline) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        while (buf.includes('\n\n')) {
-          const idx = buf.indexOf('\n\n');
-          const event = buf.slice(0, idx);
-          buf = buf.slice(idx + 2);
-          for (const line of event.split('\n')) {
-            if (!line.startsWith('data:')) continue;
-            try {
-              const obj = JSON.parse(line.slice(5).trim());
-              if (obj.contentType === '1001' && obj.content) { gotContent = true; }
-              else if (obj.contentType && obj.contentType !== '1002' && obj.content) { errMsg = obj.content; }
-            } catch {}
-          }
-        }
-        if (gotContent || errMsg) break;
-      }
-      if (errMsg) {
-        resultEl.innerHTML = `<span style="color:#c00">❌ ${t('ag_test_scnet_err')}${errMsg}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
-      } else if (gotContent) {
-        resultEl.innerHTML = `<span style="color:green">✅ ${t('ag_test_scnet_ok')}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
-      } else {
-        resultEl.innerHTML = `<span style="color:#c00">❌ ${t('ag_test_scnet_empty')}</span><br><span style="font-size:11px;color:var(--text-muted,#999)">${t('ag_elapsed')} ${elapsed}s</span>`;
-      }
-    } else {
+    {
+      // OpenAI 兼容
       // OpenAI 兼容
       const text = await resp.text();
       let modelInfo = '';

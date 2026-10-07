@@ -24,7 +24,38 @@ const AgentSandboxJS = {
     return this._loading;
   },
 
+  // [ADD 2026-10-07 single-instance guard] VFS veto + cross-context mutex —
+  // same rationale as agent-sandbox-python.js (one active engine per page;
+  // one sandbox FS round-trip at a time per browser). (synced from apishare)
+  _staleEpoch(ctx) {
+    if (typeof window === 'undefined') return false;
+    if (ctx && ctx.engineEpoch !== undefined && ctx.engineEpoch !== null) {
+      return window.__aicqEngineEpoch !== ctx.engineEpoch;
+    }
+    return false;
+  },
+  async _withFsLock(fn) {
+    if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request) {
+      const r = await navigator.locks.request('aicq-agent-sandbox-fs', { ifAvailable: true }, async (lock) => {
+        if (!lock) return { __fsBusy: true };
+        return await fn();
+      });
+      if (r && r.__fsBusy) {
+        return { success: false, error: 'sandbox busy: another view/tab of this site is running code — stop it there and retry here' };
+      }
+      return r;
+    }
+    return await fn();
+  },
+
   async execute(args, ctx) {
+    if (this._staleEpoch(ctx)) {
+      return { success: false, error: 'engine superseded — this agent instance lost the page to a newer one; tool call dropped' };
+    }
+    return await this._withFsLock(() => this._executeLocked(args, ctx));
+  },
+
+  async _executeLocked(args, ctx) {
     // 先恢复虚拟文件系统到全局变量
     const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
     const fsData = {};
@@ -77,6 +108,11 @@ const AgentSandboxJS = {
       if (result !== undefined) output += String(result) + '\n';
 
       // 持久化文件系统变更
+      // [ADD 2026-10-07 single-instance guard] re-check before writing: the
+      // epoch may have moved while this code was running.
+      if (this._staleEpoch(ctx)) {
+        return { success: false, error: 'engine superseded during execution — FS write dropped (result shown above was NOT persisted)', output };
+      }
       // [ADD 2026-09-07 v0.4.8] exec-js 写的 .html 自动投递预览到聊天（限独立壳，
       // 见 agent-tools-native.js _emitFileChunk 注释）。每次执行 fsData 从空开始，
       // 只有本次新写的文件会投递；单次最多 3 个防刷屏。二进制（Uint8Array）跳过。

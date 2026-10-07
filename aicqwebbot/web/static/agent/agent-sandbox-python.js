@@ -156,7 +156,41 @@ _pxur.urlopen = _px_urlopen
     console.log('[Pyodide] network shim installed: urllib.request.urlopen -> built-in web proxy (no CORS)');
   },
 
+  // [ADD 2026-10-07 single-instance guard] VFS veto: a superseded engine
+  // generation (another engine module instance on the page took over, epoch
+  // bumped on window) must NEVER restore/run/save the shared IndexedDB FS —
+  // that overlap was the "VFS flip-flop" root cause. Also serialized with a
+  // Web Locks mutex so two BROWSING CONTEXTS (dock iframe + standalone tab,
+  // same IndexedDB origin) cannot restore/run/save concurrently.
+  _staleEpoch(ctx) {
+    if (typeof window === 'undefined') return false;
+    if (ctx && ctx.engineEpoch !== undefined && ctx.engineEpoch !== null) {
+      return window.__aicqEngineEpoch !== ctx.engineEpoch;
+    }
+    return false; // no generation stamp (legacy caller) → no veto
+  },
+  async _withFsLock(fn) {
+    if (typeof navigator !== 'undefined' && navigator.locks && navigator.locks.request) {
+      const r = await navigator.locks.request('aicq-agent-sandbox-fs', { ifAvailable: true }, async (lock) => {
+        if (!lock) return { __fsBusy: true };
+        return await fn();
+      });
+      if (r && r.__fsBusy) {
+        return { success: false, error: 'sandbox busy: another view/tab of this site is running code — stop it there and retry here' };
+      }
+      return r;
+    }
+    return await fn(); // Web Locks unavailable → guard degrades gracefully
+  },
+
   async execute(args, ctx) {
+    if (this._staleEpoch(ctx)) {
+      return { success: false, error: 'engine superseded — this agent instance lost the page to a newer one; tool call dropped' };
+    }
+    return await this._withFsLock(() => this._executeLocked(args, ctx));
+  },
+
+  async _executeLocked(args, ctx) {
     const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
     let pyodide;
     try {
@@ -211,6 +245,11 @@ _pxur.urlopen = _px_urlopen
     }
     // 持久化文件系统
     if (result) {
+      // [ADD 2026-10-07 single-instance guard] re-check before writing: the
+      // epoch may have moved while this code was running.
+      if (this._staleEpoch(ctx)) {
+        return { success: false, error: 'engine superseded during execution — FS write dropped (result shown above was NOT persisted)', output: output };
+      }
       // [ADD 2026-09-07 v0.4.8] 快照差分投递：执行前记录 .html 基线（path→size），
       // 执行后把「新增或变化」的 HTML 投递到聊天（限独立壳，见 _emitFileChunk）。
       // 不能无差别全发 —— _saveFS 每次执行都重存 /home 全部文件，会刷屏；且
@@ -263,14 +302,21 @@ _pxur.urlopen = _px_urlopen
     if (!this._pyodide) return;
     try {
       const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
-      // 列出 /home 目录下所有文件
+      // [FIX 2026-10-07 repos-writes, synced from apishare 09874d1] walk
+      // /home AND /repos. /repos/* holds git-cloned repos materialized into
+      // MEMFS by _restoreFS; sandbox code (and LLM agents editing cloned
+      // repos) writes there with open(path,'w'), but only /home was
+      // persisted — every edit to a cloned repo was silently discarded on
+      // the next execute (same-call re-reads still saw the MEMFS copy, so
+      // the agent's own verification lied).
       const files = this._pyodide.runPython(`
         import os
         result = []
-        for root, dirs, filenames in os.walk('/home'):
-          for f in filenames:
-            path = os.path.join(root, f)
-            result.append(path)
+        for base in ('/home', '/repos'):
+            for root, dirs, filenames in os.walk(base):
+                for f in filenames:
+                    path = os.path.join(root, f)
+                    result.append(path)
         result
       `);
       for (const path of files.toJs()) {

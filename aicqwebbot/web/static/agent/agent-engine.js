@@ -3,8 +3,18 @@
    ═════════════════════════════════════════════════════ */
 
 // Cache-buster version for dynamic imports — bump when agent modules change
-const _AGENT_VER = '20261007e';
+const _AGENT_VER = '20261007g';
 function _agUrl(name) { return `/static/agent/${name}?v=${_AGENT_VER}`; }
+
+// [ADD 2026-10-07 single-instance guard] (synced from apishare.cc 24a4e9f)
+// A page can hold SEVERAL engine module generations at once (cache-buster
+// URLs + reload cycles + dock iframe + standalone tab). Two live instances
+// restoring+saving the same IndexedDB FS = the "VFS flip-flop" root cause.
+// Guard: last connectAgent wins the page (window epoch registry); earlier
+// generations retire (WS closed, messages dropped, loops bail, sandbox
+// refuses restore/run/save). Same-module reconnects don't bump the epoch.
+const _EPOCH_KEY = '__aicqEngineEpoch';
+const _OWNER_KEY = '__aicqActiveEngine';
 
 const AgentEngine = {
 
@@ -59,6 +69,10 @@ const AgentEngine = {
   },
   _agentWS: {},  // agentId → WebSocket
   _running: {},  // agentId+sessionId → boolean (防重入)
+  // [ADD 2026-10-07 single-instance guard] this module generation's epoch
+  // (null = never took ownership; set in connectAgent).
+  _myEpoch: null,
+  _superseded: false,
   // [ADD 2026-10-06] Stop-button support:
   //   _stopReq  — lockKey → user asked to stop this run (checked at every
   //               await boundary in _agentLoop / _callLLMRetry)
@@ -73,9 +87,45 @@ const AgentEngine = {
   // 让服务端把全部 chunk 聚合进同一个 StreamBuffer 并在 stream_end 时落库。
   _activeStreams: {},
 
+  // [ADD 2026-10-07 single-instance guard] helpers (synced from apishare)
+  _epochStale() {
+    if (this._superseded) return true;
+    if (typeof window === 'undefined') return false;
+    return this._myEpoch !== null && window[_EPOCH_KEY] !== this._myEpoch;
+  },
+  _retireAll(reason) {
+    if (this._superseded) return;
+    this._superseded = true;
+    console.warn('[AgentEngine] this engine instance retired:', reason || 'superseded by a newer engine instance');
+    try {
+      for (const id of Object.keys(this._agentWS || {})) {
+        const w = this._agentWS[id];
+        if (w) { try { w._intentionalClose = true; w.close(); } catch (e) {} }
+      }
+    } catch (e) {}
+    try {
+      for (const k of Object.keys(this._llmAbort || {})) {
+        try { if (this._llmAbort[k]) this._llmAbort[k].abort(); } catch (e) {}
+      }
+    } catch (e) {}
+  },
+
   // 连接 agent WS (用 agent 的 access_token)
   async connectAgent(config) {
     const agentId = config.agent_id;
+    // [ADD 2026-10-07 single-instance guard] cross-module takeover: newest
+    // engine module instance on the page wins; the previous one retires.
+    if (typeof window !== 'undefined') {
+      const prev = window[_OWNER_KEY];
+      if (prev && prev !== this && typeof prev._retireAll === 'function') {
+        window[_EPOCH_KEY] = (window[_EPOCH_KEY] || 0) + 1;
+        try { prev._retireAll('a newer engine instance took over this page'); } catch (e) {}
+      } else if (!prev) {
+        window[_EPOCH_KEY] = window[_EPOCH_KEY] || 0;
+      }
+      window[_OWNER_KEY] = this;
+      this._myEpoch = window[_EPOCH_KEY];
+    }
     if (this._agentWS[agentId]) {
       // [FIX 2026-10-06] mark the old socket as intentionally closed so its
       // onclose handler does NOT schedule a backoff reconnect — in-place
@@ -251,6 +301,12 @@ const AgentEngine = {
         console.log(`[AgentEngine] Agent ${agentId} WS closed intentionally (hot-switch) — no reconnect`);
         return;
       }
+      // [ADD 2026-10-07 single-instance guard] a retired engine generation
+      // must not resurrect its sockets via the backoff reconnect chain.
+      if (this._epochStale()) {
+        console.log(`[AgentEngine] Agent ${agentId} WS closed — engine instance retired, no reconnect`);
+        return;
+      }
       if (ws._pingInterval) clearInterval(ws._pingInterval);
       // [FIX 2026-08-30] 指数退避重连（风暴根因修复）：此前固定 3s 重试，token
       // 过期(TOKEN_INVALID)后永远失败 → 每 3-5s 一次的永久重连风暴。单 IP 每分
@@ -316,6 +372,12 @@ const AgentEngine = {
 
   // 处理收到的消息（从 WS 或主页面 hook）
   async handleAgentMessage(msg, config) {
+    // [ADD 2026-10-07 single-instance guard] a superseded engine generation
+    // never answers messages — the active instance owns them.
+    if (this._epochStale()) {
+      console.warn('[AgentEngine] message dropped — this engine instance was superseded by a newer one');
+      return;
+    }
     // 处理私聊和群聊消息
     // [FIX 2026-07-06] Also accept group_message (was previously rejected here even after
     // the WS handler passed it through)
@@ -763,6 +825,12 @@ const AgentEngine = {
         this._sendStreamChunk(config.agent_id, replyTarget, config, '(Stopped by user)', 'text');
         break;
       }
+      // [ADD 2026-10-07 single-instance guard] a newer engine took over the
+      // page mid-run — bail silently and never touch the virtual FS again.
+      if (this._epochStale()) {
+        console.warn('[AgentEngine] agent loop aborted — engine instance superseded mid-run');
+        break;
+      }
       // 调 LLM
       // [2026-08-28] 传入 replyTarget — 流式路径需要知道往哪个会话发 stream_chunk
       // [FIX 2026-08-30] const → let: 空回复降级重试路径需要重新赋值 llmResp
@@ -774,6 +842,12 @@ const AgentEngine = {
       // [ADD 2026-10-06] Stop while the LLM call was in flight
       if (this._stopHit(config.agent_id, sessionId) || (llmResp && llmResp.error === '__user_stopped__')) {
         this._sendStreamChunk(config.agent_id, replyTarget, config, '(Stopped by user)', 'text');
+        break;
+      }
+      // [ADD 2026-10-07 single-instance guard] superseded while the LLM call
+      // was in flight — drop the result silently.
+      if (this._epochStale()) {
+        console.warn('[AgentEngine] agent loop aborted after LLM return — engine instance superseded');
         break;
       }
 
@@ -839,11 +913,21 @@ const AgentEngine = {
             }, 'tool_result');
             break;
           }
+          // [ADD 2026-10-07 single-instance guard] never run tools (and thus
+          // never restore/write the virtual FS) from a superseded generation.
+          if (this._epochStale()) {
+            console.warn('[AgentEngine] tool execution skipped — engine instance superseded:', tc.function && tc.function.name);
+            break;
+          }
           let args = {};
           try { args = JSON.parse(tc.function.arguments); } catch(e) {}
           const ctx = { agentId: config.agent_id, sessionId, ws: this._agentWS[config.agent_id], agentConfig: config, // [FIX 2026-08-29] replyTarget = the real account_id for WS sends — sessionId may be a
       // chat_session_id (cs_xxx) which is NOT a routable WS node; _autoSendFile must use this
-      replyTarget: replyTarget || sessionId };
+      replyTarget: replyTarget || sessionId,
+      // [ADD 2026-10-07 single-instance guard] generation stamp — the sandbox
+      // veto (agent-sandbox-*.js) refuses restore/execute/save when the global
+      // epoch has moved past this value (cross-context protection too).
+      engineEpoch: this._myEpoch };
 
           const toolName = tc.function.name;
 

@@ -531,6 +531,195 @@ async def git_clone_proxy(request: Request):
     })
 
 
+# ═══════════════ 3c. Git push relay ═══════════════
+# [ADD 2026-10-07] Mirrors apishare.cc's Go relay (bot_gitpush.go): the browser
+# agent has no git binary, so the relay performs a real atomic commit through
+# the GitHub Git Data API — blobs → tree (based on the branch head's tree) →
+# commit → ref update (force=false, non-fast-forward fails safely). The user's
+# GitHub token (fine-grained PAT with Contents: read+write) is used for the
+# upstream calls only and never stored server-side. Bounds: ≤200 files/commit,
+# ≤2MB/file, ≤8MB total raw, ≤24MB body; per-IP 10 pushes / 10 min.
+_gitpush_rate = {}
+
+
+async def _gh_call(method: str, endpoint: str, token: str, payload=None, timeout: int = 30):
+    """One token-authenticated api.github.com call. Returns (status, body)."""
+    headers = {"User-Agent": UA, "Accept": "application/vnd.github+json",
+               "Authorization": f"Bearer {token}"}
+    try:
+        async with httpx.AsyncClient(timeout=timeout, headers=headers, follow_redirects=True) as c:
+            if payload is not None:
+                r = await c.request(method, f"https://api.github.com{endpoint}", json=payload)
+            else:
+                r = await c.request(method, f"https://api.github.com{endpoint}")
+    except Exception as e:
+        return 0, {"message": f"github unreachable: {type(e).__name__}: {e}"}
+    try:
+        body = r.json() if (r.content and r.headers.get("content-type", "").startswith("application/json")) else {"message": r.text[:2000]}
+    except Exception:
+        body = {"message": (r.text or "")[:2000]}
+    return r.status_code, body
+
+
+def _gh_err_text(status: int, body, prefix: str) -> str:
+    detail = str(body.get("message", ""))[:300] if isinstance(body, dict) else str(body)[:300]
+    if status == 0:
+        return f"{prefix}: {detail}"
+    if status == 401:
+        return "github rejected the token (401 unauthorized) — check the token value"
+    if status == 403:
+        return "github refused the operation (403) — the token likely lacks Contents: read and write on this repository, or the API rate limit was hit"
+    if status == 404:
+        return f"{prefix} (404 not found) — check the repository/branch and that the token can access it"
+    return f"{prefix} (github status {status}): {detail}"
+
+
+def _push_clean_path(p: str) -> str:
+    p = (p or "").strip().replace("\\", "/")
+    p = re.sub(r"/+", "/", p).strip("/")
+    if not p or p == "." or ".." in p.split("/") or len(p) > 512:
+        return ""
+    return p
+
+
+@app.post("/api/v1/agent/git-push")
+async def git_push_proxy(request: Request):
+    try:
+        payload = await request.json()
+    except Exception:
+        return JSONResponse({"error": "invalid JSON body"}, status_code=400)
+
+    token = (payload.get("token") or "").strip()
+    if not token:
+        return JSONResponse({"error": "github token required — create a fine-grained PAT at github.com/settings/personal-access-tokens/new with Contents: read and write on the target repository"}, status_code=400)
+    message = (payload.get("message") or "").strip()
+    if not message:
+        return JSONResponse({"error": "commit message required"}, status_code=400)
+
+    url = (payload.get("url") or "").strip()
+    m = re.match(r"^https?://(?:www\.)?github\.com/([A-Za-z0-9._-]{1,100})/([A-Za-z0-9._-]{1,100}?)(?:\.git)?(?:/tree/([^/]+))?/?$", url)
+    if not m:
+        return JSONResponse({"error": "only github.com repository URLs are supported"}, status_code=400)
+    owner, repo = m.group(1), m.group(2)
+    branch = ((payload.get("branch") or m.group(3) or "").strip()).replace("refs/heads/", "")
+    if not branch or any(ch in branch for ch in ("..", "?", "#")):
+        return JSONResponse({"error": "branch required for git-push"}, status_code=400)
+
+    # per-IP fixed-window rate limit (10 / 10 min)
+    ip = request.client.host if request.client else "?"
+    now = time.time()
+    win = _gitpush_rate.get(ip)
+    if win is None or now - win[0] >= 600:
+        if len(_gitpush_rate) > 4096:
+            _gitpush_rate.clear()
+        _gitpush_rate[ip] = (now, 1)
+    elif win[1] >= 10:
+        return JSONResponse({"error": "rate limit: 10 pushes per 10 minutes, try again later"}, status_code=429)
+    else:
+        _gitpush_rate[ip] = (win[0], win[1] + 1)
+
+    # validate + normalize the changed-file set before touching github
+    MAX_FILES, MAX_FILE, MAX_TOTAL = 200, 2 << 20, 8 << 20
+    changes, total = [], 0
+    for f in (payload.get("files") or [])[:MAX_FILES + 1]:
+        if len(changes) >= MAX_FILES:
+            return JSONResponse({"error": f"too many files in one commit (max {MAX_FILES})"}, status_code=400)
+        p = _push_clean_path(f.get("path") or "")
+        if not p:
+            return JSONResponse({"error": f"invalid file path: {f.get('path')}"}, status_code=400)
+        enc = (f.get("encoding") or "utf8").strip().lower()
+        if enc not in ("utf8", "base64"):
+            return JSONResponse({"error": f"encoding must be utf8 or base64 (path {p})"}, status_code=400)
+        content = f.get("content") or ""
+        raw = len(content) * 3 // 4 if enc == "base64" else len(content)
+        if raw > MAX_FILE:
+            return JSONResponse({"error": f"file too large (max 2MB): {p}"}, status_code=400)
+        total += raw
+        if total > MAX_TOTAL:
+            return JSONResponse({"error": "total changed content too large (max 8MB per commit)"}, status_code=400)
+        changes.append({"path": p, "content": content, "encoding": enc, "is_delete": False})
+    deletions, seen = [], set()
+    for d in (payload.get("deletions") or []):
+        p = _push_clean_path(d)
+        if not p:
+            return JSONResponse({"error": f"invalid deletion path: {d}"}, status_code=400)
+        if p in seen:
+            continue
+        seen.add(p)
+        deletions.append(p)
+    if not changes and not deletions:
+        return JSONResponse({"error": "nothing to commit — provide files and/or deletions"}, status_code=400)
+
+    created_branch = False
+    # 1. resolve the branch head (optionally create the branch first)
+    st, body = await _gh_call("GET", f"/repos/{owner}/{repo}/git/ref/heads/{branch}", token)
+    if st != 200:
+        if st == 404 and payload.get("create"):
+            st2, meta = await _gh_call("GET", f"/repos/{owner}/{repo}", token)
+            default_branch = (meta or {}).get("default_branch", "main") if st2 == 200 else "main"
+            st3, dref = await _gh_call("GET", f"/repos/{owner}/{repo}/git/ref/heads/{default_branch}", token)
+            if st3 != 200:
+                return JSONResponse({"error": _gh_err_text(st3, dref, "cannot read default branch")}, status_code=400)
+            st4, cbody = await _gh_call("POST", f"/repos/{owner}/{repo}/git/refs", token,
+                                        payload={"ref": f"refs/heads/{branch}", "sha": (dref or {}).get("object", {}).get("sha")})
+            if st4 not in (200, 201):
+                return JSONResponse({"error": _gh_err_text(st4, cbody, f"cannot create branch {branch}")}, status_code=400)
+            st, body = await _gh_call("GET", f"/repos/{owner}/{repo}/git/ref/heads/{branch}", token)
+            created_branch = True
+        else:
+            return JSONResponse({"error": _gh_err_text(st, body, f"cannot read branch {branch} (does it exist? token valid / repo accessible?)")}, status_code=400)
+    base_sha = (body or {}).get("object", {}).get("sha")
+
+    # 2. base tree of the branch head
+    st, bcommit = await _gh_call("GET", f"/repos/{owner}/{repo}/git/commits/{base_sha}", token)
+    if st != 200:
+        return JSONResponse({"error": _gh_err_text(st, bcommit, "cannot read base commit")}, status_code=502)
+    base_tree = (bcommit or {}).get("tree", {}).get("sha")
+
+    # 3. blobs for every changed file
+    tree_entries, n_files, n_dels = [], 0, 0
+    for c in changes:
+        if c["is_delete"]:
+            tree_entries.append({"path": c["path"], "mode": "100644", "type": "blob", "sha": None})
+            n_dels += 1
+            continue
+        st, blob = await _gh_call("POST", f"/repos/{owner}/{repo}/git/blobs", token,
+                                  payload={"content": c["content"], "encoding": c["encoding"]})
+        if st not in (200, 201):
+            return JSONResponse({"error": _gh_err_text(st, blob, f"cannot create blob for {c['path']}")}, status_code=502)
+        tree_entries.append({"path": c["path"], "mode": "100644", "type": "blob", "sha": blob.get("sha")})
+        n_files += 1
+    for p in deletions:
+        tree_entries.append({"path": p, "mode": "100644", "type": "blob", "sha": None})
+        n_dels += 1
+
+    # 4. one atomic tree on top of the branch's current tree
+    st, tree = await _gh_call("POST", f"/repos/{owner}/{repo}/git/trees", token,
+                              payload={"base_tree": base_tree, "tree": tree_entries})
+    if st not in (200, 201):
+        return JSONResponse({"error": _gh_err_text(st, tree, "cannot create tree")}, status_code=502)
+
+    # 5. commit it
+    st, commit = await _gh_call("POST", f"/repos/{owner}/{repo}/git/commits", token,
+                                payload={"message": message, "tree": tree.get("sha"), "parents": [base_sha]})
+    if st not in (200, 201):
+        return JSONResponse({"error": _gh_err_text(st, commit, "cannot create commit")}, status_code=502)
+
+    # 6. move the branch ref (force=false → fail instead of clobbering)
+    st, ref = await _gh_call("PATCH", f"/repos/{owner}/{repo}/git/refs/heads/{branch}", token,
+                             payload={"sha": commit.get("sha"), "force": False})
+    if st != 200:
+        if st == 422:
+            return JSONResponse({"error": "branch moved since it was read (non-fast-forward) — run git-pull to refresh your copy, then push again"}, status_code=409)
+        return JSONResponse({"error": _gh_err_text(st, ref, f"cannot update ref {branch}")}, status_code=502)
+
+    return JSONResponse({
+        "ok": True, "repo": f"{owner}/{repo}", "branch": branch,
+        "commit": commit.get("sha"), "html_url": commit.get("html_url"),
+        "files": n_files, "deletions": n_dels, "created_branch": created_branch,
+    })
+
+
 # ═══════════════ 4/5. Frontend static hosting ═══════════════
 # /static/app.js|app.css  — shell UI
 # /static/agent/*         — agent bundle (identical paths to aicq.me so the

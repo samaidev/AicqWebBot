@@ -1544,6 +1544,193 @@ const AgentToolsNative = {
     };
   },
 
+  // ── git-pull ──
+  // [ADD 2026-10-07] 刷新已克隆仓库（pull 语义）：复用 git-clone 服务端中继拉
+  // 最新 tarball，覆盖写回同一 VFS 目录，并删除上游已不存在的文件。与
+  // git-clone 共享中继限流（6 次/10 分钟/用户）。
+  async git_pull(args, ctx) {
+    const repoUrl = String(args.url || '').trim();
+    if (!repoUrl) return { success: false, error: 'url is required (e.g. https://github.com/owner/repo)' };
+    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    let resp;
+    try {
+      resp = await fetch('/api/v1/agent/git-clone', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._authToken(ctx) },
+        body: JSON.stringify({ url: repoUrl, branch: String(args.branch || '') })
+      });
+    } catch (e) {
+      return { success: false, error: 'git-pull relay unreachable: ' + e.message };
+    }
+    let data;
+    try { data = await resp.json(); } catch (e) {
+      return { success: false, error: 'git-pull relay returned non-JSON (status ' + resp.status + ')' };
+    }
+    if (!resp.ok || !data.ok) {
+      return { success: false, error: data.detail || data.error || ('git-pull relay status ' + resp.status) };
+    }
+    const m = repoUrl.match(/github\.com\/([A-Za-z0-9._-]+)\/([A-Za-z0-9._-]+)/);
+    const owner = m ? m[1] : 'github';
+    const repo = m ? m[2].replace(/\.git$/, '') : 'repo';
+    const branchSafe = String(data.branch || 'main').replace(/[^A-Za-z0-9._-]+/g, '-');
+    const root = args.path
+      ? ('/' + String(args.path).replace(/^\/+|\/+$/g, ''))
+      : '/repos/' + owner + '/' + repo + '/' + branchSafe;
+    let oldPaths = [];
+    try {
+      oldPaths = (await AgentStorage.listFiles(ctx.agentId, root)).map(f => f.path);
+    } catch (e) { /* listing failure must not block the refresh */ }
+    const oldSet = new Set(oldPaths);
+    const entries = [];
+    const newSet = new Set();
+    for (const f of (data.files || [])) {
+      if (!f || !f.path) continue;
+      let content;
+      if (f.encoding === 'base64') {
+        try {
+          const bin = atob(f.content);
+          const bytes = new Uint8Array(bin.length);
+          for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+          content = bytes.buffer;
+        } catch (e) { continue; }
+      } else {
+        content = f.content;
+      }
+      const p = root + '/' + f.path;
+      newSet.add(p);
+      entries.push({ path: p, content });
+    }
+    if (!entries.length) {
+      return { success: false, error: 'relay returned ' + ((data.files || []).length) + ' files but none could be decoded' };
+    }
+    let saved = 0;
+    try {
+      saved = await AgentStorage.saveFiles(ctx.agentId, entries);
+    } catch (e) {
+      return { success: false, error: 'failed to write virtual FS: ' + e.message };
+    }
+    let removed = 0;
+    for (const p of oldPaths) {
+      if (!newSet.has(p)) {
+        try { await AgentStorage.deleteFile(ctx.agentId, p); removed++; } catch (e) { /* keep going */ }
+      }
+    }
+    let added = 0;
+    for (const p of newSet) if (!oldSet.has(p)) added++;
+    const skipped = data.skipped_count ? ' ' + data.skipped_count + ' entries skipped (too large).' : '';
+    const trunc = data.truncated ? ' RESULT TRUNCATED — caps hit; the local copy may be incomplete.' : '';
+    return {
+      success: true,
+      output: `Pulled latest github.com/${data.repo} (branch "${data.branch}") into ${root} — ${saved} files on disk (${added} newly added, ${Math.max(0, saved - added)} updated, ${removed} removed upstream).${skipped}${trunc} The folder in the file manager (folder icon) is refreshed; local edits to files that still exist upstream were overwritten.`
+    };
+  },
+
+  // ── git-push ──
+  // [ADD 2026-10-07] 服务端 git 推送中继：经 GitHub Git Data API 产生真实原子
+  // 提交（blobs → tree → commit → ref 更新，非 fast-forward 会安全失败）。浏览
+  // 器无 git 二进制，写接口也无法跨域直调 —— 由 Go 中继完成。用户的 GitHub
+  // token 只存本浏览器 IndexedDB 的 agent 配置，服务器不落盘、仅用于本次
+  // api.github.com 调用。
+  async git_push(args, ctx) {
+    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
+    const cfg = (await AgentStorage.getConfig(ctx.agentId)) || {};
+    let token = String(args.token || '').trim() || String(cfg.github_token || '').trim();
+    if (!token) {
+      return { success: false, error: 'GitHub token required. Ask the user for a fine-grained personal access token with "Contents: read and write" permission on the target repository (create one at https://github.com/settings/personal-access-tokens/new). The user can paste it in chat — then call this tool with token=<value> once and it will be remembered in the local agent config (browser only; it is sent exclusively to api.github.com through this site relay).' };
+    }
+    let filesIn = args.files;
+    if (typeof filesIn === 'string') {
+      try { filesIn = JSON.parse(filesIn); } catch (e) {
+        return { success: false, error: 'files is not valid JSON: ' + e.message };
+      }
+    }
+    if (filesIn && !Array.isArray(filesIn)) filesIn = [filesIn];
+    let deletions = args.deletions;
+    if (typeof deletions === 'string') {
+      try { deletions = JSON.parse(deletions); } catch (e) {
+        return { success: false, error: 'deletions is not valid JSON: ' + e.message };
+      }
+    }
+    if (deletions && !Array.isArray(deletions)) deletions = [deletions];
+    const files = [];
+    let total = 0;
+    for (const f of (filesIn || [])) {
+      if (!f || !f.path) continue;
+      if (f.vfs_path) {
+        // 内容取自虚拟 FS（克隆仓库里改过的文件最常见）
+        const file = await AgentStorage.readFile(ctx.agentId, f.vfs_path);
+        if (!file) return { success: false, error: 'virtual FS file not found: ' + f.vfs_path };
+        let content, encoding;
+        if (file.content instanceof ArrayBuffer) {
+          content = this._bufToBase64(file.content);
+          encoding = 'base64';
+        } else {
+          content = String(file.content);
+          encoding = 'utf8';
+        }
+        total += content.length;
+        files.push({ path: String(f.path), content, encoding });
+      } else if (f.content !== undefined && f.content !== null) {
+        const content = String(f.content);
+        total += content.length;
+        files.push({ path: String(f.path), content, encoding: f.encoding === 'base64' ? 'base64' : 'utf8' });
+      }
+    }
+    if (!files.length && !(deletions || []).length) {
+      return { success: false, error: 'nothing to commit — pass files (inline content or vfs_path) and/or deletions' };
+    }
+    if (total > 10 * 1024 * 1024) {
+      return { success: false, error: 'total changed content exceeds ~8MB relay cap — split into several commits' };
+    }
+    let resp;
+    try {
+      resp = await fetch('/api/v1/agent/git-push', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._authToken(ctx) },
+        body: JSON.stringify({
+          url: String(args.url || ''),
+          branch: String(args.branch || ''),
+          message: String(args.message || ''),
+          create: !!args.create,
+          files,
+          deletions: (deletions || []).map(d => String(d)),
+          token
+        })
+      });
+    } catch (e) {
+      return { success: false, error: 'git-push relay unreachable: ' + e.message };
+    }
+    let data;
+    try { data = await resp.json(); } catch (e) {
+      return { success: false, error: 'git-push relay returned non-JSON (status ' + resp.status + ')' };
+    }
+    if (!resp.ok || !data.ok) {
+      return { success: false, error: data.detail || data.error || ('git-push relay status ' + resp.status) };
+    }
+    // 首次显式提供的 token 记入本地 agent 配置，下次免输入
+    if (args.token && !cfg.github_token) {
+      try {
+        cfg.github_token = String(args.token).trim();
+        await AgentStorage.saveConfig(ctx.agentId, cfg);
+      } catch (e) { /* persist failure does not affect this push */ }
+    }
+    return {
+      success: true,
+      output: `Pushed to github.com/${data.repo} branch "${data.branch}" — commit ${String(data.commit || '').slice(0, 10)} (${data.files} file(s) changed, ${data.deletions} deleted).${data.created_branch ? ' The branch was newly created from the repo default branch.' : ''} Commit URL: ${data.html_url}`
+    };
+  },
+
+  // 分块 base64（大文件直接 String.fromCharCode.apply 会爆栈）
+  _bufToBase64(buf) {
+    const bytes = new Uint8Array(buf);
+    let bin = '';
+    const CH = 0x8000;
+    for (let i = 0; i < bytes.length; i += CH) {
+      bin += String.fromCharCode.apply(null, bytes.subarray(i, i + CH));
+    }
+    return btoa(bin);
+  },
+
   // ── upload-file ──
   // [FIX 2026-09-06] 原实现在无头环境/用户取消时会永久挂起（promise 永不 resolve，
   // 卡死整个 agent 循环 45s+）。补 oncancel 监听 + 90s 兑底超时。

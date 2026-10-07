@@ -3,7 +3,7 @@
    ═════════════════════════════════════════════════════ */
 
 // Cache-buster version for dynamic imports — bump when agent modules change
-const _AGENT_VER = '20261007c';
+const _AGENT_VER = '20261007d';
 function _agUrl(name) { return `/static/agent/${name}?v=${_AGENT_VER}`; }
 
 const AgentEngine = {
@@ -684,6 +684,14 @@ const AgentEngine = {
     // 按 analyze-image 同款先例强制附加（服务端已限流 6 次/10 分钟/用户）。
     if (!tools.some(t => t.function && t.function.name === 'git-clone')) {
       tools.push(...AgentTools.toOpenAIFormat(['git-clone']));
+    }
+    // [ADD 2026-10-07] git-pull / git-push 同上（git-pull 复用 clone 中继限流，
+    // git-push 服务端限流 10 次/10 分钟/用户；token 只存本浏览器 agent 配置）。
+    if (!tools.some(t => t.function && t.function.name === 'git-pull')) {
+      tools.push(...AgentTools.toOpenAIFormat(['git-pull']));
+    }
+    if (!tools.some(t => t.function && t.function.name === 'git-push')) {
+      tools.push(...AgentTools.toOpenAIFormat(['git-push']));
     }
     // [2026-09-04] search-session-history 内置强制注册 — 上下文压缩的配套回查工具，
     // 压缩提醒文本会让模型调用它，必须始终可用

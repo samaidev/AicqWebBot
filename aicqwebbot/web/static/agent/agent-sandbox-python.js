@@ -175,7 +175,7 @@ _pxur.urlopen = _px_urlopen
 
     // [FIX 2026-09-06] 缺包自动安装重试：ModuleNotFoundError: No module named 'X'
     // → micropip/loadPackage 安装后自动重跑一次（每次会话每个包只试一次）。
-    // data-analysis / csv-process / install-package 及 LLM 生成的 pandas 代码因此开箱即用。
+    // install-package 及 LLM 生成的 pandas 代码因此开箱即用。
     this._autoInstalled = this._autoInstalled || new Set();
     let result = null;
     for (let attempt = 0; attempt < 2; attempt++) {

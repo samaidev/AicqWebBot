@@ -858,7 +858,7 @@ const AgentEngine = {
           let result;
           const isWasmTool = AgentTools._getCategory(toolName) === 'wasm';
 
-          if (isWasmTool && toolName !== 'exec-code' && toolName !== 'exec-js' && toolName !== 'export-data') {
+          if (isWasmTool && toolName !== 'exec-code' && toolName !== 'exec-js') {
             // WASM 文件系统工具
             const { AgentToolsWasm } = await import(_agUrl('agent-tools-wasm.js'));
             result = await AgentToolsWasm.execute(toolName, args, ctx);

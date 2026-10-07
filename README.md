@@ -10,7 +10,7 @@
 
 ---
 
-**AicqWebBot** is a browser-native AI agent runtime. `pip install` it, run one line, open localhost, paste your model key — and a full agent (LLM loop, 50+ tools, WASM code sandbox, memory) starts running **entirely inside your browser tab**.
+**AicqWebBot** is a browser-native AI agent runtime. `pip install` it, run one line, open localhost, paste your model key — and a full agent (LLM loop, 40+ tools, WASM code sandbox, memory) starts running **entirely inside your browser tab**.
 
 The local server it starts is a *thin, stateless relay*: it only proxies your model API calls (to bypass browser CORS) and serves static files. **Zero execution happens on the server.** Your API key, your conversation history, your files — everything stays on your machine.
 
@@ -52,7 +52,7 @@ The insight: **containers are scarce on servers, but the browser is a free, pre-
 
 The bundled agent runtime (a zero-modification build of the [aicq.me](https://aicq.me) web agent) ships with:
 
-- **50+ built-in tools** — web search, web read, HTTP client, file system (virtual FS), doc/xlsx/pdf/ppt creation, charts, image drawing, QR codes, email, clipboard, translate, weather, task planning, and more
+- **40+ built-in tools** — web search, web read, HTTP client, file system (virtual FS), doc/xlsx/pdf/ppt creation, charts, image drawing, clipboard, task planning, and more
 - **Free anonymous models** — no API key at all: OpenCode Zen free models (0.4.10+). Calls egress from **your machine** via the local relay — never from any server
 - **Code sandbox** — Python (Pyodide / numpy / pandas) or JavaScript (QuickJS), executing as WebAssembly inside your tab
 - **Context compression** — long conversations are automatically summarized so memory usage stays bounded

@@ -20,7 +20,7 @@
   const $ = (id) => document.getElementById(id);
   const AGENT_ID_KEY = 'aicqwebbot_agent_id';
   const DEFAULT_TOOLS = ['web-search', 'web-read', 'url-read', 'save-memory', 'recall-memory',
-    'task-plan', 'system-info', 'weather', 'qr-code', 'translate', 'exec-code',
+    'task-plan', 'exec-code',
     'create-image', 'create-chart', 'read-clipboard', 'write-clipboard',
   // [ADD 2026-10-06] FS / document readers — composer attachments land in the
   // virtual FS and the agent needs these to actually read them

@@ -145,18 +145,6 @@ const AgentToolsNative = {
     return { success: true, output: text, results };
   },
 
-  // ── save-knowledge ──
-  async save_knowledge(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
-    await AgentStorage.saveMemory(ctx.agentId, 'knowledge', args.content, args.title, 0.7, ctx.sessionId);
-    return { success: true, output: 'Knowledge saved.' };
-  },
-
-  // ── search-knowledge ──
-  async search_knowledge(args, ctx) {
-    return this.recall_memory(args, ctx);
-  },
-
   // ── create-doc (enhanced) ──
   // 支持元素：paragraph (含 runs 富文本), heading, list, table, image, pagebreak
   // 旧格式 (string content) 向后兼容
@@ -1241,20 +1229,6 @@ const AgentToolsNative = {
     return { success: true, output: `Image created: ${filename} (${canvas.width}x${canvas.height}) and sent to user.`, files: [filename] };
   },
 
-  // ── send-email ──
-  async send_email(args, ctx) {
-    // 通过 aicq 服务器代理发送（用户需要在设置里配 SMTP API）
-    const config = ctx.agentConfig;
-    if (!config.smtp_api_url) return { success: false, error: "Outbound email needs an SMTP HTTP API. This platform only runs inbound verification mail (no SMTP out), so configure one in agent settings: smtp_api_url = your HTTP-to-email webhook (e.g. sendgrid/v3/mail/send or formsubmit.co endpoint) and smtp_api_key = its bearer token. The request is then relayed server-side through web-proxy (no CORS issues)." };
-    const resp = await fetch('/api/v1/agent/web-proxy', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._authToken(ctx) },
-      body: JSON.stringify({ url: config.smtp_api_url, mode: 'raw', method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': config.smtp_api_key || '' },
-        body: JSON.stringify({ to: args.to, subject: args.subject, body: args.body }) })
-    });
-    return { success: resp.ok, output: resp.ok ? 'Email sent.' : `Failed: ${resp.status}` };
-  },
-
   // ── send-message ──
   // Supports text messages AND file sending from virtual FS
   async send_message(args, ctx) {
@@ -1345,21 +1319,6 @@ const AgentToolsNative = {
     return { success: true, output: `Reminder set for ${args.minutes} minutes.` };
   },
 
-  // ── system-info ──
-  async system_info(args, ctx) {
-    const info = {
-      userAgent: navigator.userAgent,
-      platform: navigator.platform,
-      language: navigator.language,
-      screen: `${screen.width}x${screen.height}`,
-      viewport: `${window.innerWidth}x${window.innerHeight}`,
-      cookies: navigator.cookieEnabled,
-      online: navigator.onLine,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone
-    };
-    return { success: true, output: JSON.stringify(info, null, 2), info };
-  },
-
   // ── screenshot ──
   async screenshot(args, ctx) {
     await this._loadScript('https://cdn.jsdelivr.net/npm/html2canvas@1.4.1/dist/html2canvas.min.js');
@@ -1368,74 +1327,6 @@ const AgentToolsNative = {
     const filename = `screenshot_${Date.now()}.png`;
     await this._saveToVS(ctx, filename, blob);
     return { success: true, output: `Screenshot saved: ${filename}`, files: [filename] };
-  },
-
-  // ── translate ──
-  async translate(args, ctx) {
-    const url = `https://translate.googleapis.com/translate_a/single?client=gtx&sl=${args.from||'auto'}&tl=${args.to}&dt=t&q=${encodeURIComponent(args.text)}`;
-    const resp = await fetch('/api/v1/agent/web-proxy', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._authToken(ctx) },
-      body: JSON.stringify({ url, mode: 'raw' })
-    });
-    if (!resp.ok) return { success: false, error: 'Translate failed' };
-    const data = await resp.json();
-    const translated = JSON.parse(data.body)[0].map(s => s[0]).join('');
-    return { success: true, output: translated };
-  },
-
-  // ── qr-code ──
-  // [FIX 2026-10-07] Primary path now generates the QR LOCALLY (canvas via the
-  // qrcode-generator CDN lib — same _loadScript pattern as docx/pdf-lib). The
-  // old api.qrserver.com path went through web-proxy whose JSON encoding
-  // mangles binary bytes (U+FFFD) and produced corrupt PNGs; it stays as a
-  // fallback using the NEW body_b64 binary channel (bot.go binary:true).
-  async qr_code(args, ctx) {
-    const size = args.size || 256;
-    const filename = `qr_${Date.now()}.png`;
-    try {
-      await this._loadScript('https://cdn.jsdelivr.net/npm/qrcode-generator@1.4.4/qrcode.js');
-      if (typeof qrcode === 'function') {
-        const qr = qrcode(0, 'M');
-        qr.addData(String(args.data || ''));
-        qr.make();
-        const count = qr.getModuleCount();
-        const cell = Math.max(2, Math.floor(size / (count + 8)));
-        const dim = (count + 8) * cell;
-        const canvas = document.createElement('canvas');
-        canvas.width = dim; canvas.height = dim;
-        const c = canvas.getContext('2d');
-        c.fillStyle = '#FFFFFF';
-        c.fillRect(0, 0, dim, dim);
-        c.fillStyle = '#000000';
-        for (let r = 0; r < count; r++) {
-          for (let col = 0; col < count; col++) {
-            if (qr.isDark(r, col)) c.fillRect((col + 4) * cell, (r + 4) * cell, cell, cell);
-          }
-        }
-        const blob = await new Promise(res => canvas.toBlob(res, 'image/png'));
-        if (blob) {
-          await this._saveToVS(ctx, filename, blob);
-          await this._autoSendFile(ctx, filename, blob);
-          return { success: true, output: `QR code created: ${filename} (${dim}x${dim}px) and sent to user.`, files: [filename] };
-        }
-      }
-    } catch (e) { console.warn('[qr-code] local generation failed, falling back to relay:', e); }
-    const url = `https://api.qrserver.com/v1/create-qr-code/?size=${size}x${size}&data=${encodeURIComponent(args.data)}`;
-    const resp = await fetch('/api/v1/agent/web-proxy', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._authToken(ctx) },
-      body: JSON.stringify({ url, mode: 'raw', binary: true })
-    });
-    if (!resp.ok) return { success: false, error: 'QR code API failed: ' + resp.status };
-    const respData = await resp.json();
-    if (!respData.body_b64) return { success: false, error: 'QR code API returned empty' };
-    const bin = atob(respData.body_b64);
-    const bytes = new Uint8Array(bin.length);
-    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-    const blob = new Blob([bytes], { type: 'image/png' });
-    await this._saveToVS(ctx, filename, blob);
-    await this._autoSendFile(ctx, filename, blob);
-    return { success: true, output: `QR code created: ${filename} and sent to user.`, files: [filename] };
   },
 
   // ── read-clipboard ──
@@ -1754,103 +1645,6 @@ const AgentToolsNative = {
       if (typeof input.oncancel !== 'undefined') input.oncancel = () => done({ success: false, error: 'Upload cancelled by user (no file selected).' });
       input.click();
     });
-  },
-
-  // ── weather ──
-  // [FIX 2026-09-06] 原实现拉 wttr.in 的 j1 大 JSON（>40KB），被 web-proxy 的
-  // 20000 字符截断后 JSON.parse 必炸（"Unterminated string at position 20000"）。
-  // 改用紧凑文本格式（单行、无 JSON），另保留 j1 兜底 + 容错解析。
-  async weather(args, ctx) {
-    const loc = String(args.location || '').trim();
-    // [FIX 2026-09-06] 三级策略（wttr.in 无 CORS 头、open-meteo 有每 IP 日限额，
-    // 单一源都会翻车）：
-    //   ① 本地/容器形态：wttr.in 经 web-proxy（curl UA 才能拿紧凑文本）
-    //   ② 静态形态：nominatim(OSM) 地理编码 + met.no compact（均免 key + CORS 全开）
-    //   ③ 互为兜底，全失败才报错
-    // ① wttr.in via proxy
-    try {
-      const locEnc = encodeURIComponent(loc);
-      const body = await this._proxyBody(`https://wttr.in/${locEnc}?format=%C,+%t,+humidity+%h,+wind+%w&m`, ctx, { 'User-Agent': 'curl/8.0' });
-      if (body && !body.trim().startsWith('<') && !/Unknown|ERROR|blocked/i.test(body.slice(0, 60))) {
-        return { success: true, output: `${loc}: ${body.trim().slice(0, 300)}` };
-      }
-    } catch (e) { /* static mode has no proxy — try met.no below */ }
-    // ② met.no (browser-reachable, CORS-open)
-    try {
-      let lat = null, lon = null, place = loc;
-      const nom = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(loc), { headers: { 'Accept': 'application/json' } });
-      const nj = await nom.json();
-      if (nj && nj[0]) {
-        lat = parseFloat(nj[0].lat); lon = parseFloat(nj[0].lon);
-        place = (nj[0].display_name || loc).split(',').slice(0, 2).join(',');
-      }
-      if (lat !== null) {
-        const mr = await fetch(`https://api.met.no/weatherapi/locationforecast/2.0/compact?lat=${lat}&lon=${lon}`);
-        if (mr.ok) {
-          const mj = await mr.json();
-          const ts = mj.properties?.timeseries?.[0];
-          const d = ts?.data?.instant?.details || {};
-          const sym = ts?.data?.next_1_hours?.summary?.symbol_code || '';
-          const desc = this._metnoText(sym);
-          if (d.air_temperature !== undefined) {
-            return { success: true, output: `${place}: ${desc}, ${Math.round(d.air_temperature)}°C, Humidity ${Math.round(d.relative_humidity?.humidity ?? d.relative_humidity ?? 0)}%, Wind ${Math.round(d.wind_speed ?? 0)}km/h` };
-          }
-        }
-      }
-    } catch (e) { /* fall through */ }
-    // ③ open-meteo 最后尝试（每日限额可能已耗尽，尽力而为）
-    try {
-      const geo = await fetch('https://geocoding-api.open-meteo.com/v1/search?count=1&language=en&format=json&name=' + encodeURIComponent(loc));
-      const g = await geo.json();
-      const hit = g.results && g.results[0];
-      if (hit) {
-        const wResp = await fetch('https://api.open-meteo.com/v1/forecast?latitude=' + hit.latitude + '&longitude=' + hit.longitude + '&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m');
-        const w = await wResp.json();
-        if (w.current && w.current.temperature_2m !== undefined) {
-          const c = w.current;
-          return { success: true, output: `${hit.name}${hit.country ? ', ' + hit.country : ''}: ${this._wmoText(c.weather_code)}, ${c.temperature_2m}°C, Humidity ${c.relative_humidity_2m}%, Wind ${c.wind_speed_10m}km/h` };
-        }
-      }
-    } catch (e) { /* final fall through */ }
-    return { success: false, error: `Weather data unavailable for ${loc} (all three sources failed)` };
-  },
-
-  // met.no symbol_code → 文本（按前缀归并）
-  _metnoText(sym) {
-    if (!sym) return 'Unknown';
-    const s = sym.split('_')[0];
-    const map = { clearsky: 'Clear sky', fair: 'Fair', partlycloudy: 'Partly cloudy', cloudy: 'Cloudy', rain: 'Rain', lightrain: 'Light rain', heavyrain: 'Heavy rain', rainshowers: 'Rain showers', snow: 'Snow', lightsnow: 'Light snow', heavysnow: 'Heavy snow', snowshowers: 'Snow showers', sleet: 'Sleet', fog: 'Fog', thunder: 'Thunderstorm' };
-    return map[s] || sym;
-  },
-
-  // WMO weather code → 文本（open-meteo 标准）
-  _wmoText(code) {
-    const map = { 0: 'Clear sky', 1: 'Mainly clear', 2: 'Partly cloudy', 3: 'Overcast', 45: 'Fog', 48: 'Depositing rime fog', 51: 'Light drizzle', 53: 'Moderate drizzle', 55: 'Dense drizzle', 56: 'Light freezing drizzle', 57: 'Dense freezing drizzle', 61: 'Slight rain', 63: 'Moderate rain', 65: 'Heavy rain', 66: 'Light freezing rain', 67: 'Heavy freezing rain', 71: 'Slight snow', 73: 'Moderate snow', 75: 'Heavy snow', 77: 'Snow grains', 80: 'Slight rain showers', 81: 'Moderate rain showers', 82: 'Violent rain showers', 85: 'Slight snow showers', 86: 'Heavy snow showers', 95: 'Thunderstorm', 96: 'Thunderstorm with slight hail', 99: 'Thunderstorm with heavy hail' };
-    return map[code] !== undefined ? map[code] + ' (code ' + code + ')' : 'Unknown (code ' + code + ')';
-  },
-
-  // web-proxy POST 的公共小封装（返回 body 文本；可覆盖请求头）
-  async _proxyBody(url, ctx, extraHeaders) {
-    const resp = await fetch('/api/v1/agent/web-proxy', {
-      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': 'Bearer ' + this._authToken(ctx) },
-      body: JSON.stringify({ url, mode: 'raw', headers: extraHeaders || {} })
-    });
-    if (!resp.ok) throw new Error('proxy ' + resp.status);
-    const data = await resp.json();
-    return data.body || '';
-  },
-
-  // ── export-data ──
-  async export_data(args, ctx) {
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
-    const data = await AgentStorage.exportAgent(ctx.agentId);
-    if (!data) return { success: false, error: 'No agent data found' };
-    const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `agent_${ctx.agentId}_export.json`;
-    a.click();
-    return { success: true, output: 'Agent database exported.' };
   },
 
   // ── selfaicq: manage agent's own AICQ account ──

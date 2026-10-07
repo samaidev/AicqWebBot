@@ -1955,7 +1955,7 @@ const AgentToolsNative = {
 
   // ── workflow ──
   async workflow(args, ctx) {
-    const { AgentWorkflow } = await import('/static/agent/agent-workflow.js');
+    const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007e');
     const action = args.action || 'list';
     const agentId = ctx.agentId;
 

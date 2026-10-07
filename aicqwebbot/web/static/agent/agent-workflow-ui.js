@@ -31,7 +31,7 @@ async function openWorkflowManager(agentId) {
 async function renderWorkflowList(agentId) {
   const modal = document.getElementById('workflowModal');
   if (!modal) return;
-  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007a');
+  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007e');
   const workflows = await AgentWorkflow.list(agentId);
   // [FIX 2026-09-04] HTML 转义（工作流名可由 LLM 通过 workflow 工具创建）
   const _escH = (typeof esc === 'function') ? esc
@@ -81,10 +81,10 @@ async function renderWorkflowList(agentId) {
 
 // ─── 工作流编辑器 ───
 async function showWorkflowEditor(agentId, workflowId) {
-  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007a');
+  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007e');
   const wf = workflowId ? await AgentWorkflow.get(agentId, workflowId) : null;
   const stepTypes = AgentWorkflow.STEP_TYPES;
-  const AgentTools = (await import('/static/agent/agent-tools.js')).default;
+  const AgentTools = (await import('/static/agent/agent-tools.js?v=20261007e')).default;
   // [FIX 2026-09-04] HTML 转义
   const _escH = (typeof esc === 'function') ? esc
     : (s) => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
@@ -266,7 +266,7 @@ async function saveWorkflow(agentId, workflowId) {
   // 避免静默写入 workflows_undefined 孤儿数据
   agentId = agentId || window._wfAgentId;
   if (!agentId) { toast('缺少 agentId，无法保存工作流', 'error'); return; }
-  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007a');
+  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007e');
   const name = document.getElementById('wfName').value.trim() || 'Untitled';
   const desc = document.getElementById('wfDesc').value.trim();
   const steps = collectSteps();
@@ -293,7 +293,7 @@ async function runWorkflow(agentId, workflowId) {
   agentId = agentId || window._wfAgentId;
   if (!agentId || !workflowId) { toast('缺少 agentId 或 workflowId，无法运行', 'error'); return; }
   toast('正在运行工作流...', 'info');
-  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007a');
+  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007e');
   const result = await AgentWorkflow.run(agentId, workflowId);
   if (result.success) {
     toast('工作流运行成功 ✅', 'success');
@@ -308,7 +308,7 @@ async function runWorkflow(agentId, workflowId) {
 async function showWorkflowRuns(agentId, workflowId) {
   agentId = agentId || window._wfAgentId;
   if (!agentId) { toast('缺少 agentId，无法查看运行记录', 'error'); return; }
-  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007a');
+  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007e');
   const runs = await AgentWorkflow.listRuns(agentId, workflowId, 20);
   const modal = document.getElementById('workflowModal');
   // [FIX 2026-09-04] HTML 转义
@@ -348,7 +348,7 @@ async function deleteWorkflow(agentId, workflowId) {
   agentId = agentId || window._wfAgentId;
   if (!agentId || !workflowId) { toast('缺少 agentId 或 workflowId，无法删除', 'error'); return; }
   if (!confirm('确定删除此工作流？')) return;
-  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007a');
+  const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007e');
   await AgentWorkflow.delete(agentId, workflowId);
   toast('已删除', 'success');
   renderWorkflowList(agentId);

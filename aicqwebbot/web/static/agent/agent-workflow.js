@@ -152,7 +152,6 @@ const AgentWorkflow = {
         case 'web_search': result = await this._stepWebSearch(params, agentId); break;
         case 'web_read': result = await this._stepWebRead(params, agentId); break;
         case 'send_message': result = await this._stepSendMessage(params, context, agentId); break;
-        case 'email': result = await this._stepEmail(params, agentId); break;
         case 'set_variable': result = this._stepSetVariable(params, context); break;
         case 'transform': result = this._stepTransform(params, context); break;
         default: return { status: 'failed', result: null, error: `Unknown step type: ${stepType}` };
@@ -235,7 +234,7 @@ const AgentWorkflow = {
     const ctx = { agentId, sessionId: `wf_${context.workflow_id || ''}`, ws: window.AgentEngine?._agentWS?.[agentId], agentConfig: config };
 
     // 调用原生工具或 WASM 工具
-    const AgentTools = (await import('/static/agent/agent-tools.js')).default;
+    const AgentTools = (await import('/static/agent/agent-tools.js?v=20261007e')).default;
     const category = AgentTools._getCategory(skillName);
 
     if (category === 'wasm') {
@@ -339,17 +338,9 @@ const AgentWorkflow = {
     return `Message sent to ${target}`;
   },
 
-  async _stepEmail(params, agentId) {
-    const { AgentToolsNative } = await import('/static/agent/agent-tools-native.js');
-    const AgentStorage = (await import('/static/agent/agent-storage.js')).default;
-    const config = await AgentStorage.getConfig(agentId);
-    const result = await AgentToolsNative.send_email(params, { agentId, agentConfig: config });
-    // [FIX 2026-09-04] send_email 返回 {success:false, error} 时抛错，让步骤正确标记 failed
-    if (result && typeof result === 'object' && result.success === false) {
-      throw new Error(result.error || 'send_email failed');
-    }
-    return result;
-  },
+  // [2026-10-07] email 步骤类型已随 r11 工具清理移除（send-email 工具已删，
+  // 平台无外发 SMTP）。存量含 email 步骤的工作流会得到明确的 "Unknown step
+  // type" 报错而不是 AgentToolsNative.send_email is not a function 崩溃。
 
   _stepSetVariable(params, context) {
     const varName = params.name;
@@ -500,7 +491,6 @@ const AgentWorkflow = {
     { type: 'condition', name: '条件判断', desc: '根据条件表达式决定执行路径', requiredParams: ['expression'] },
     { type: 'delay', name: '延时等待', desc: '等待指定秒数', requiredParams: ['seconds'] },
     { type: 'send_message', name: '发送消息', desc: '通过 AICQ 发送消息', requiredParams: ['content'] },
-    { type: 'email', name: '发送邮件', desc: '通过 SMTP API 发送邮件', requiredParams: ['to', 'subject', 'body'] },
     { type: 'set_variable', name: '设置变量', desc: '设置工作流变量', requiredParams: ['name', 'value'] },
     { type: 'transform', name: '数据转换', desc: 'JSON 提取、分割、替换等数据转换', requiredParams: ['input', 'operation'] },
   ]

@@ -3,7 +3,7 @@
    ═════════════════════════════════════════════════════ */
 
 // Cache-buster version for dynamic imports — bump when agent modules change
-const _AGENT_VER = '20261007h';
+const _AGENT_VER = '20261008a';
 function _agUrl(name) { return `/static/agent/${name}?v=${_AGENT_VER}`; }
 
 // [ADD 2026-10-07 single-instance guard] (synced from apishare.cc 24a4e9f)
@@ -759,6 +759,16 @@ const AgentEngine = {
     // 压缩提醒文本会让模型调用它，必须始终可用
     if (!tools.some(t => t.function && t.function.name === 'search-session-history')) {
       tools.push(...AgentTools.toOpenAIFormat(['search-session-history']));
+    }
+    // [ADD 2026-10-08 r22] read-line / grep 强制附加 — 大文件保护的配套工具：
+    // read-file 现在硬截 20000 字并在结果里引导模型改用它们；存量 agent 的
+    // config.tools 清单快照若早于这两个工具，模型照提示调用只会拿到
+    // "Unknown WASM tool"。只读基础能力，按 analyze-image 先例强制注册。
+    if (!tools.some(t => t.function && t.function.name === 'read-line')) {
+      tools.push(...AgentTools.toOpenAIFormat(['read-line']));
+    }
+    if (!tools.some(t => t.function && t.function.name === 'grep')) {
+      tools.push(...AgentTools.toOpenAIFormat(['grep']));
     }
     const toolsNL = this._toolsToNaturalLanguage(tools);
 

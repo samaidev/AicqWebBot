@@ -19,7 +19,7 @@ function _T(k, en) {
 
 async function openSettings(agentId) {
   const AgentStorage = (await import('/static/agent/agent-storage.js?v=20261007a')).default;
-  const AgentTools = (await import('/static/agent/agent-tools.js?v=20261007e')).default;
+  const AgentTools = (await import('/static/agent/agent-tools.js?v=20261008a')).default;
   const config = await AgentStorage.getConfig(agentId);
   if (!config) { toast('Agent config not found', 'error'); return; }
   // [2026-09-29] 0.4.9 曾把遗留 opencode 配置迁移为 openai —— 0.4.10 供应商恢复后

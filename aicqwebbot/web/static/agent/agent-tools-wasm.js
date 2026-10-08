@@ -6,7 +6,7 @@
 // (synced from apishare b4caac0) — bare URLs hit the browser's long static
 // cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
 // with agent-engine.js._AGENT_VER.
-const _AGENT_VER = '20261007h';
+const _AGENT_VER = '20261008a';
 
 const AgentToolsWasm = {
   async execute(toolName, args, ctx) {
@@ -29,12 +29,111 @@ const AgentToolsWasm = {
     return { success: false, error: 'Unknown action: ' + args.action };
   },
 
+  // [ADD 2026-10-08 r22] 单次读取字符预算 —— read-file/edit-file(read)/read-line/grep
+  // 共用。旧 read_file 静默截 8000（模型根本不知道被截断），更大的文件直接把
+  // LLM 上下文打爆。20000 与 url-read 的 max_length 上限对齐；截断时结果里
+  // 必须带明确标记 + 继续读取的路径（grep 定位 → read-line 翻页）。
+  _READ_CAP: 20000,
+
   async read_file(args, ctx) {
     const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const file = await AgentStorage.readFile(ctx.agentId, args.path);
     if (!file) return { success: false, error: `File not found: ${args.path}` };
     const text = new TextDecoder().decode(file.content);
-    return { success: true, output: text.slice(0, 8000), path: args.path, size: file.size };
+    const totalLines = text.length ? text.split('\n').length : 0;
+    let output = text, truncated = false;
+    if (text.length > this._READ_CAP) {
+      output = text.slice(0, this._READ_CAP);
+      const cut = output.lastIndexOf('\n');
+      if (cut > 0) output = output.slice(0, cut); // 只保留完整行，避免半行干扰
+      truncated = true;
+    }
+    const linesShown = truncated ? output.split('\n').length : totalLines;
+    const result = { success: true, path: args.path, size: file.size,
+                     total_chars: text.length, total_lines: totalLines,
+                     lines_shown: linesShown, truncated, output };
+    if (truncated) {
+      result.note = `TRUNCATED at ${this._READ_CAP} chars (${linesShown}/${totalLines} lines shown). ` +
+        `Do NOT re-read the whole file: locate with grep first, then ` +
+        (totalLines > linesShown
+          ? `read-line(path, offset=${linesShown + 1}) for later sections.`
+          : `use exec-js _readFile(path) with .slice(a,b) for char windows (single huge line).`);
+    }
+    return result;
+  },
+
+  // [ADD 2026-10-08 r22] 按行号翻页读大文件 —— read-file 20000 字硬截的配套。
+  // offset 与本工具打印的行号一致（1-based），模型可以机械地接续 offset=last+1。
+  // 单行超预算（压缩 JS/JSON）时截断该行并给出 exec-js 字符窗口的替代路径。
+  async read_line(args, ctx) {
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
+    const file = await AgentStorage.readFile(ctx.agentId, args.path);
+    if (!file) return { success: false, error: `File not found: ${args.path}` };
+    const lines = new TextDecoder().decode(file.content).split('\n');
+    const total = lines.length;
+    let start = parseInt(args.offset, 10); if (!Number.isFinite(start) || start < 1) start = 1;
+    let limit = parseInt(args.limit, 10); if (!Number.isFinite(limit) || limit < 1) limit = 400;
+    if (start > total) return { success: false, error: `offset ${start} is beyond EOF (file has ${total} lines)` };
+    const out = []; let chars = 0, end = start - 1, truncatedLine = false;
+    for (let i = start - 1; i < total && end - start + 1 < limit; i++) {
+      const prefix = String(i + 1).padStart(6) + '→';
+      const need = prefix.length + lines[i].length + 1;
+      if (out.length && chars + need > this._READ_CAP) break;
+      if (need > this._READ_CAP) { // 单行超整个预算：展示行头后停止
+        out.push(prefix + lines[i].slice(0, this._READ_CAP - prefix.length));
+        end = i + 1; truncatedLine = true; break;
+      }
+      out.push(prefix + lines[i]);
+      chars += need; end = i + 1;
+    }
+    const remaining = total - end;
+    let output = out.join('\n');
+    if (truncatedLine) output += `\n... [line ${end} exceeds the ${this._READ_CAP}-char budget — cut mid-line; for char windows use exec-js _readFile(path).then(t => t.slice(a, b))]`;
+    else if (remaining > 0) output += `\n... [${remaining} more lines — continue: read-line(path, offset=${end + 1})]`;
+    return { success: true, path: args.path, lines_read: [start, end],
+             total_lines: total, remaining, output };
+  },
+
+  // [ADD 2026-10-08 r22] 全虚拟 FS 内容检索（ripgrep 风格）—— 在克隆的仓库里
+  // 定位代码的标准手段：grep 拿到 path:line 后用 read-line 拉精确区间，
+  // 替代"整文件读进上下文"的旧习惯。结果数与字符双上限。
+  async grep(args, ctx) {
+    const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
+    if (!args.pattern) return { success: false, error: 'pattern is required' };
+    let regex;
+    try { regex = new RegExp(args.pattern, args.ignore_case ? 'i' : ''); }
+    catch (e) { return { success: false, error: `Invalid regex: ${e.message}. Escape special chars for a literal search.` }; }
+    let globRe = null;
+    if (args.glob) {
+      const g = String(args.glob).replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]').replace(/\u0000/g, '.*');
+      globRe = new RegExp('(^|/)' + g + '$');
+    }
+    let maxResults = parseInt(args.max_results, 10);
+    if (!Number.isFinite(maxResults) || maxResults < 1) maxResults = 50;
+    if (maxResults > 200) maxResults = 200;
+    const files = await AgentStorage.listFiles(ctx.agentId, args.dir || '/');
+    const matches = []; let filesSearched = 0, chars = 0, capHit = false;
+    for (const f of files) {
+      if (matches.length >= maxResults) { capHit = true; break; }
+      if (globRe && !globRe.test(f.path)) continue;
+      if (f.size > 2 * 1024 * 1024) continue; // 跳过 >2MB（二进制/构建产物）
+      const file = await AgentStorage.readFile(ctx.agentId, f.path);
+      if (!file) continue;
+      filesSearched++;
+      const lines = new TextDecoder().decode(file.content).split('\n');
+      for (let i = 0; i < lines.length; i++) {
+        if (matches.length >= maxResults) { capHit = true; break; }
+        if (!regex.test(lines[i])) continue;
+        const m = `${f.path}:${i + 1}: ${lines[i].slice(0, 200)}`;
+        if (chars + m.length > this._READ_CAP) { capHit = true; break; }
+        matches.push(m); chars += m.length + 1;
+      }
+      if (capHit) break;
+    }
+    if (!matches.length) return { success: true, output: `No matches for /${args.pattern}/${args.ignore_case ? 'i' : ''} (searched ${filesSearched} files).` };
+    let output = matches.join('\n');
+    if (capHit) output += `\n... [result cap reached (${matches.length} shown, max_results=${maxResults}) — narrow with dir / glob / a stricter pattern, or continue with more specific searches]`;
+    return { success: true, output, match_count: matches.length, files_searched: filesSearched };
   },
 
   async write_file(args, ctx) {
@@ -75,10 +174,21 @@ const AgentToolsWasm = {
   async search_file(args, ctx) {
     const AgentStorage = (await import('/static/agent/agent-storage.js?v=' + _AGENT_VER)).default;
     const files = await AgentStorage.listFiles(ctx.agentId, args.dir || '/');
-    const pattern = args.pattern.replace(/\*/g, '.*').replace(/\?/g, '.');
-    const regex = new RegExp(pattern);
+    // [FIX 2026-10-08 r22] 锚定 glob（旧实现非锚定：pattern "go" 会命中一切含
+    // "go" 的路径）+ ** 跨段支持 + 500 条上限。规则：模式在任意深度匹配 ——
+    // "*.go" 等价 basename 匹配，"src/*.js" 等价任意层级 src/ 目录下匹配。
+    let body = String(args.pattern || '').trim()
+      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+      .replace(/\*\*/g, '\u0000').replace(/\*/g, '[^/]*').replace(/\?/g, '[^/]').replace(/\u0000/g, '.*');
+    let regex;
+    try { regex = new RegExp('^(.*/)?' + body + '$'); }
+    catch (e) { return { success: false, error: 'Invalid pattern: ' + e.message }; }
     const matched = files.filter(f => regex.test(f.path));
-    return { success: true, output: matched.length ? matched.map(f => f.path).join('\n') : 'No files matched.' };
+    const CAP = 500;
+    const shown = matched.slice(0, CAP);
+    return { success: true, match_count: matched.length, output: shown.length
+      ? shown.map(f => f.path).join('\n') + (matched.length > CAP ? `\n... [+${matched.length - CAP} more — narrow with dir or a stricter pattern]` : '')
+      : 'No files matched.' };
   },
 
   async file_diff(args, ctx) {

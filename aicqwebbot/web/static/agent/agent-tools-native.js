@@ -6,7 +6,7 @@
 // (synced from apishare b4caac0) — bare URLs hit the browser's long static
 // cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
 // with agent-engine.js._AGENT_VER.
-const _AGENT_VER = '20261007h';
+const _AGENT_VER = '20261008a';
 
 const AgentToolsNative = {
   // [C4] Get auth token for proxy calls
@@ -1970,7 +1970,7 @@ const AgentToolsNative = {
 
   // ── workflow ──
   async workflow(args, ctx) {
-    const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261007e');
+    const { AgentWorkflow } = await import('/static/agent/agent-workflow.js?v=20261008a');
     const action = args.action || 'list';
     const agentId = ctx.agentId;
 

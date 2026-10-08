@@ -7,7 +7,7 @@
 // (synced from apishare b4caac0) — bare URLs hit the browser's long static
 // cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
 // with agent-engine.js._AGENT_VER.
-const _AGENT_VER = '20261007h';
+const _AGENT_VER = '20261008a';
 
 // [2026-09-07] i18n helper — 宿主页面提供 t()（aicq.me 全量字典 / 独立壳 shim）。
 // 键缺失时回退到英文文案，保证英文用户不会再看到纯中文面板。

@@ -3,7 +3,7 @@
    ═════════════════════════════════════════════════════ */
 
 // Cache-buster version for dynamic imports — bump when agent modules change
-const _AGENT_VER = '20261008a';
+const _AGENT_VER = '20261008e';
 function _agUrl(name) { return `/static/agent/${name}?v=${_AGENT_VER}`; }
 
 // [ADD 2026-10-07 single-instance guard] (synced from apishare.cc 24a4e9f)
@@ -775,9 +775,18 @@ const AgentEngine = {
     // 3. 系统提示词 — [2026-09-04] 不再注入 [当前时间]（每轮变化会打断静态前缀、
     //    破坏 prompt cache）。时间注入移到本轮用户消息末尾（可变内容只在最新部分）。
     const userSysPrompt = config.system_prompt || 'You are a helpful assistant.';
-    const sysContent = userSysPrompt +
+    let sysContent = userSysPrompt +
       '\n[提醒] 涉及信息资讯的任务，请尽量提供最新时间节点信息，让用户知道数据的时效性。' +
       '\n[输出格式] 需要给用户演示/展示页面、组件、小工具、效果时，一律生成完整可运行的单文件 HTML（内联 CSS/JS）保存为 .html 文件发给用户，而不是贴大段代码让用户自己运行；需要画图（示意图/流程图/图表/图形）时，一律用 SVG 绘制（可内联在 HTML 中或保存为 .svg 文件发送），不要用 ASCII 字符画、不要发截图。';
+    // [ADD 2026-10-08 r27] VFS 摘要注入（port of apishare.cc r27）— 文件管理器
+    // 上传 / create-image / git-clone 等写入虚拟 FS 时不产生聊天消息，模型上下文
+    // 对文件毫无感知，实测复现"用户上传文件后问模型能否看到，模型答看不到"。
+    // 注入存储层 fsSummary（根目录清单 + 主动验证指令）。摘要缓存 15s 且仅随
+    // FS 增删变化 —— 静态前缀与 prompt cache 不受每轮影响。
+    try {
+      const _fsNote = await AgentStorage.fsSummary(config.agent_id);
+      if (_fsNote) sysContent += '\n[Virtual FS] ' + _fsNote;
+    } catch (e) { console.warn('[AgentEngine] fsSummary inject failed:', e); }
 
     // 4. 上下文压缩：计算 maxcontextrate =（系统提示词+工具注册+cuttime 后全量历史+本轮消息）
     //    占模型最大上下文的百分比；> 80% 启动 cutAndSumHistory 压缩

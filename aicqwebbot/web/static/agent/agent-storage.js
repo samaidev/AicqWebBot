@@ -3,16 +3,76 @@
    + 导出/导入智能体数据库
    ═══════════════════════════════════════════════════════ */
 
+// [fix 2026-10-08] Uint8Array → base64 分块转换。
+// 旧写法 btoa(String.fromCharCode(...u8)) 把每个字节展开成函数参数，
+// 大文件（约 >64KB）会超引擎参数上限直接抛 RangeError → 导出失败。
+function u8ToBase64(u8) {
+  let s = '';
+  const CH = 0x2000;   // 8KB/块，远低于各引擎参数个数上限
+  for (let i = 0; i < u8.length; i += CH) {
+    s += String.fromCharCode.apply(null, u8.subarray(i, Math.min(i + CH, u8.length)));
+  }
+  return btoa(s);
+}
+
 const AgentStorage = {
+  // [2026-10-08 r23] DB_NAME 不再是常量：按登录用户隔离。
+  // init() 会先等待宿主页面提供的身份信号（window.__agentUserNSReady，
+  // 由 apishare 的 bot-bridge.js 从 JWT sub 解出 32-hex user_id），
+  // 然后把实际数据库名定为 aicq_agents__u_<uid>。没有身份系统的
+  // 宿主（AicqWebBot 单机版）保持旧名 aicq_agents，行为零变化。
   DB_NAME: 'aicq_agents',
+  _ns: undefined,          // '' = 无身份系统（旧行为）；'anon' = 有身份系统但未登录；'<uid>' = 已登录
+  _initPromise: null,
   // [2026-09-04] v2: 新增 agent_sessions 会话表（含 cuttime 上下文压缩游标）。
   // onupgradeneeded 只增不改，对存量数据无影响。
   DB_VERSION: 2,
   _db: null,
 
+  // ═══ [r23] 用户命名空间 ═══
+  // 当前命名空间后缀。undefined = 身份未解析完成（init 前不要用）。
+  ns() {
+    if (this._ns !== undefined) return this._ns;
+    if (typeof window === 'undefined') return '';
+    // 直接读取（init 尚未跑完时的兜底）：宿主若已同步写入就用它
+    return (window.__agentUserNS === undefined) ? '' : (String(window.__agentUserNS || 'anon'));
+  },
+
+  // localStorage 键作用域化：<base>__u_<ns>。无身份系统的宿主返回原名。
+  lsk(base) {
+    const ns = this.ns();
+    return ns ? (base + '__u_' + ns) : base;
+  },
+
+  // 把 init() 的身份等待、开库、迁移合并成单飞（同一模块实例内防并发）。
   async init() {
     if (this._db) return this._db;
-    return new Promise((resolve) => {
+    if (this._initPromise) return this._initPromise;
+    this._initPromise = this._initInternal().catch(() => { this._initPromise = null; return null; });
+    return this._initPromise;
+  },
+
+  async _initInternal() {
+    // ── 1. 等待宿主身份信号（最多 6s，超时按宿主是否提供信号决定命名空间）──
+    if (typeof window !== 'undefined' && window.__agentUserNSReady) {
+      let settled = false;
+      await Promise.race([
+        window.__agentUserNSReady.then(() => { settled = true; }),
+        new Promise(r => setTimeout(r, 6000))
+      ]).catch(() => {});
+      if (!settled) console.warn('[AgentStorage] user-namespace signal timeout — falling back');
+    }
+    if (typeof window !== 'undefined' && window.__agentUserNS !== undefined) {
+      this._ns = String(window.__agentUserNS || 'anon');
+    } else if (typeof window !== 'undefined' && window.__agentUserNSReady) {
+      this._ns = 'anon';   // 身份信号存在但解析异常 → 按匿名处理（不能回落旧共享库）
+    } else {
+      this._ns = '';       // 宿主没有身份系统（AicqWebBot 单机版等）→ 旧行为
+    }
+    this.DB_NAME = this._ns ? ('aicq_agents__u_' + this._ns) : 'aicq_agents';
+
+    // ── 2. 开库 ──
+    const db = await new Promise((resolve) => {
       const req = indexedDB.open(this.DB_NAME, this.DB_VERSION);
       req.onupgradeneeded = (e) => {
         const db = e.target.result;
@@ -42,9 +102,161 @@ const AgentStorage = {
           db.createObjectStore('agent_sessions', { keyPath: 'session_key' });
         }
       };
-      req.onsuccess = (e) => { this._db = e.target.result; resolve(this._db); };
+      req.onsuccess = (e) => { resolve(e.target.result); };
       req.onerror = () => { resolve(null); };
     });
+    this._db = db;
+    if (!db) { this._initPromise = null; return null; }   // 开库失败 → 允许下次调用重试
+
+    // ── 3. 旧库迁移（仅登录用户）：r23 之前所有账号共用 aicq_agents 单库，
+    //      第一个登录启动的智能体继承这份数据；迁移完成后删除旧库，避免
+    //      换账号登录后旧数据仍留在浏览器里（信息泄露）。迁移用 put 幂等写入，
+    //      中断重跑安全；删除失败（他页占用）不置旗标，下次启动重试。
+    //      页面里可能同时存在多个 storage 模块实例（?v= 戳不同）→ 迁移
+    //      Promise 挂到 window 上共享，避免多实例并发搬库/删库互锁。
+    if (this._ns && this._ns !== 'anon') {
+      try {
+        if (!window.__agentMigratePromise) {
+          window.__agentMigratePromise = this._migrateLegacyIfNeeded()
+            .catch((e) => console.warn('[AgentStorage] legacy migration failed:', e));
+        }
+        await window.__agentMigratePromise;
+      } catch (e) { console.warn('[AgentStorage] legacy migration failed:', e); }
+    }
+    return db;
+  },
+
+  // ═══ [r23] 旧单库 aicq_agents → 当前用户库一次性迁移 ═══
+  _LEGACY_STORES: ['agent_config', 'agent_memory', 'agent_files', 'agent_conversations', 'agent_skills', 'agent_sessions'],
+
+  async _migrateLegacyIfNeeded() {
+    const FLAG = 'aicq_agents_legacy_claimed';   // 全局旗标（不作用户作用域）：旧库已被消费
+    let claimed = false;
+    try { claimed = !!localStorage.getItem(FLAG); } catch (e) {}
+    if (claimed) return;
+
+    // 用户库已有配置 → 该用户已有自己的数据，跳过复制但仍然消费旧库（删除）
+    const cnt = await new Promise((resolve) => {
+      try {
+        const tx = this._db.transaction('agent_config', 'readonly');
+        const req = tx.objectStore('agent_config').count();
+        req.onsuccess = () => resolve(req.result || 0);
+        req.onerror = () => resolve(0);
+      } catch (e) { resolve(0); }
+    });
+
+    let legacy = null;
+    if (cnt === 0) {
+      // [r24 fix] 先用 databases() 判断旧库是否存在 —— 裸 open('aicq_agents')
+      // 会在旧库不存在时凭空创建一个空库（观察到的残留：无 objectStore 的
+      // 空库，后续每次迁移都要再识别/删除一遍）。
+      let exists = true;
+      try {
+        if (indexedDB.databases) {
+          exists = (await indexedDB.databases()).some(d => d && d.name === 'aicq_agents');
+        }
+      } catch (e) { /* databases() 不可用 → 维持旧行为（裸 open） */ }
+      if (exists) {
+        legacy = await new Promise((resolve) => {
+          try {
+            const req = indexedDB.open('aicq_agents');
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => resolve(null);
+            req.onblocked = () => resolve(null);
+          } catch (e) { resolve(null); }
+        });
+      }
+    }
+    if (legacy) {
+      const missing = this._LEGACY_STORES.some(s => !legacy.objectStoreNames.contains(s));
+      if (missing) {
+        // [r24 fix] schema 不完整：先看现有 store 里有没有真实数据。
+        // 有数据 → 绝不能删（老版本建的库可能缺新 store），不置旗标下次重试；
+        // 全空（此前裸 open 留下的残留空库）→ 直接删除并置旗标。
+        let rows = 0;
+        for (const s of this._LEGACY_STORES) {
+          if (!legacy.objectStoreNames.contains(s)) continue;
+          rows += await new Promise((resolve) => {
+            try {
+              const tx = legacy.transaction(s, 'readonly');
+              const rq = tx.objectStore(s).count();
+              rq.onsuccess = () => resolve(rq.result || 0);
+              rq.onerror = () => resolve(0);
+            } catch (e) { resolve(0); }
+          });
+        }
+        try { legacy.close(); } catch (e) {}
+        legacy = null;
+        if (rows > 0) {
+          console.warn('[AgentStorage] legacy aicq_agents has ' + rows + ' rows but an unexpected schema — NOT deleting (manual migration needed)');
+          return;
+        }
+        await new Promise((resolve) => {
+          try {
+            const req = indexedDB.deleteDatabase('aicq_agents');
+            req.onsuccess = () => resolve(true);
+            req.onerror = () => resolve(false);
+            req.onblocked = () => resolve(false);
+          } catch (e) { resolve(false); }
+        });
+        try { localStorage.setItem(FLAG, String(this._ns)); } catch (e) {}
+        console.log('[AgentStorage] empty legacy aicq_agents residue removed');
+        return;
+      }
+    }
+    let copied = false;
+    if (legacy) {
+      const t0 = Date.now();
+      let total = 0;
+      for (const storeName of this._LEGACY_STORES) {
+        const rows = await new Promise((resolve) => {
+          const tx = legacy.transaction(storeName, 'readonly');
+          const req = tx.objectStore(storeName).getAll();
+          req.onsuccess = () => resolve(req.result || []);
+          req.onerror = () => resolve([]);
+        });
+        if (!rows.length) continue;
+        await new Promise((resolve) => {
+          const tx = this._db.transaction(storeName, 'readwrite');
+          const st = tx.objectStore(storeName);
+          for (const row of rows) { try { st.put(row); total++; } catch (e) {} }
+          tx.oncomplete = () => resolve();
+          tx.onerror = () => resolve();
+        });
+      }
+      try { legacy.close(); } catch (e) {}
+      copied = true;
+      console.log('[AgentStorage] legacy aicq_agents migrated:', total, 'rows in', Date.now() - t0, 'ms');
+      // localStorage 键一并迁移到用户作用域（agent 指针 + LLM 日志）
+      for (const base of ['aicqwebbot_agent_id', 'aicq_agent_llm_logs']) {
+        try {
+          const v = localStorage.getItem(base);
+          const scoped = this.lsk(base);
+          if (v !== null && localStorage.getItem(scoped) === null) localStorage.setItem(scoped, v);
+          try { localStorage.removeItem(base); } catch (e) {}
+        } catch (e) {}
+      }
+    }
+    // [r24 fix] 仅在"复制已完成"或"旧库不存在"时删除旧库。此前无条件删除：
+    // 若旧库 schema 不完整（缺 store）复制被跳过、但库仍被删 → 用户数据被毁。
+    if (!copied && legacy) {
+      console.warn('[AgentStorage] legacy copy did not complete — keeping aicq_agents for retry');
+      return;
+    }
+    // 删除旧库（隐私：换账号后旧数据不能留在浏览器）。被其他标签页占用时
+    // onblocked → 不置旗标，下次启动重试（复制是幂等 upsert，重跑安全）。
+    const deleted = await new Promise((resolve) => {
+      try {
+        const req = indexedDB.deleteDatabase('aicq_agents');
+        req.onsuccess = () => resolve(true);
+        req.onerror = () => resolve(false);
+        req.onblocked = () => resolve(false);
+      } catch (e) { resolve(false); }
+    });
+    if (deleted) {
+      try { localStorage.setItem(FLAG, String(this._ns)); } catch (e) {}
+      console.log('[AgentStorage] legacy aicq_agents deleted (user isolation r23)');
+    }
   },
 
   // ═══ 配置存取 ═══
@@ -544,12 +756,15 @@ const AgentStorage = {
       last_accessed: Date.now(),
       persistent
     };
-    return new Promise((resolve) => {
+    const ok = await new Promise((resolve) => {
       const tx = this._db.transaction('agent_files', 'readwrite');
       tx.objectStore('agent_files').put(file);
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => resolve(false);
     });
+    // [ADD 2026-10-08 r27] FS 变化 → 摘要缓存失效（引擎 system prompt 用）
+    this._fsSummaryBump(agentId);
+    return ok;
   },
 
   // ═══ [ADD 2026-10-07] 批量写文件（git-clone 工具专用）═══
@@ -592,6 +807,10 @@ const AgentStorage = {
       }
       tx.oncomplete = () => resolve(norm.length);
       tx.onerror = () => resolve(0);
+    }).then((n) => {
+      // [ADD 2026-10-08 r27] FS 变化 → 摘要缓存失效
+      if (n > 0) this._fsSummaryBump(agentId);
+      return n;
     });
   },
 
@@ -648,12 +867,81 @@ const AgentStorage = {
     await this.init();
     if (!this._db) return;
     path = this._normalizePath(path);
-    return new Promise((resolve) => {
+    const ok = await new Promise((resolve) => {
       const tx = this._db.transaction('agent_files', 'readwrite');
       tx.objectStore('agent_files').delete(path);
       tx.oncomplete = () => resolve(true);
       tx.onerror = () => resolve(false);
     });
+    // [ADD 2026-10-08 r27] FS 变化 → 摘要缓存失效
+    this._fsSummaryBump(agentId);
+    return ok;
+  },
+
+  // ═══ [ADD 2026-10-08 r27] FS 摘要缓存（引擎 system prompt 注入用）═══
+  // 背景：VFS 的文件写入（文件管理器上传 / create-image / git-clone 等）不经过
+  // 聊天消息链路，模型的对话上下文对它们毫无感知 —— 用户问“我上传的文件你
+  // 能看到吗”时模型曾凭直觉回答“看不到”（复现实锤），只有用户明确要求调
+  // list-dir 时才看得到。修复：引擎每轮把根目录摘要注入 system prompt，模型
+  // 始终知道 FS 里有什么，可主动 list-dir/grep 验证。
+  // 性能：openKeyCursor 只拿主键（path），绝不读 content blob（git-clone 几百
+  // 文件也能毫秒级遍历）；结果缓存 15s，写入/删除路径实时失效。同页面的多个
+  // AgentStorage 模块实例（boot 链 ?v=<时间戳> vs 引擎/工具链 ?v=<AGENT_VER>）
+  // 通过 window 'agent-fs-changed' 事件互相同步失效。
+  _fsSummaryCache: {},
+  _fsSummaryTTL: 15000,
+
+  async fsSummary(agentId) {
+    if (!agentId) return '';
+    const c = this._fsSummaryCache[agentId];
+    if (c && Date.now() - c.at < this._fsSummaryTTL) return c.text;
+    await this.init();
+    if (!this._db) return c ? c.text : '';
+    // openKeyCursor: index('agent_id') key = agentId, primaryKey = path — 零 value 读取
+    const paths = await new Promise((resolve) => {
+      const out = [];
+      try {
+        const tx = this._db.transaction('agent_files', 'readonly');
+        const req = tx.objectStore('agent_files').index('agent_id').openKeyCursor(agentId);
+        req.onsuccess = () => {
+          const cur = req.result;
+          if (!cur) return resolve(out);
+          out.push(String(cur.primaryKey || ''));
+          cur.continue();
+        };
+        req.onerror = () => resolve(out);
+      } catch (e) { resolve(out); }
+    });
+    if (!paths.length) {
+      const empty = 'currently EMPTY (no files). If the user says they uploaded/created a file, tell them it is not in this browser\'s virtual FS and suggest re-uploading via the 📁 file manager.';
+      this._fsSummaryCache[agentId] = { at: Date.now(), text: empty };
+      return empty;
+    }
+    const rootSet = new Set();
+    let dirs = 0;
+    for (const p of paths) {
+      const clean = String(p).replace(/^\/+/, '');
+      if (!clean) continue;
+      const slash = clean.indexOf('/');
+      if (slash < 0) rootSet.add(clean);
+      else { rootSet.add(clean.slice(0, slash) + '/'); dirs++; }
+    }
+    const items = [...rootSet].sort();
+    const shown = items.slice(0, 14).join('; ');
+    const more = items.length > 14 ? ` …+${items.length - 14} more` : '';
+    const text = `root / currently has ${items.length} root entr${items.length === 1 ? 'y' : 'ies'} (${paths.length} file${paths.length === 1 ? '' : 's'} total): ${shown}${more}. When the user mentions an uploaded/created file — even vaguely — ALWAYS verify with list-dir/search-file/grep instead of assuming you cannot see it. Files uploaded via the 📁 file manager never appear as chat messages.`;
+    this._fsSummaryCache[agentId] = { at: Date.now(), text };
+    return text;
+  },
+
+  _fsSummaryBump(agentId) {
+    if (agentId) delete this._fsSummaryCache[agentId];
+    else this._fsSummaryCache = {};
+    try {
+      if (typeof window !== 'undefined' && window.dispatchEvent) {
+        window.dispatchEvent(new CustomEvent('agent-fs-changed', { detail: { agentId: agentId } }));
+      }
+    } catch (e) {}
   },
 
   async getFSSize(agentId) {
@@ -673,7 +961,7 @@ const AgentStorage = {
 
   // 滑动清理：按 last_accessed 淘汰非持久文件
   async _cleanFS(agentId, neededBytes) {
-    return new Promise((resolve) => {
+    const freed = await new Promise((resolve) => {
       const tx = this._db.transaction('agent_files', 'readwrite');
       const idx = tx.objectStore('agent_files').index('agent_id');
       const req = idx.getAll(agentId);
@@ -692,6 +980,9 @@ const AgentStorage = {
       };
       req.onerror = () => resolve(0);
     });
+    // [ADD 2026-10-08 r27] 清理改变了 FS → 摘要缓存失效
+    if (freed > 0) this._fsSummaryBump(agentId);
+    return freed;
   },
 
   // ═══ ClawHub Skills ═══
@@ -755,7 +1046,8 @@ const AgentStorage = {
         const all = req.result || [];
         resolve(all.map(f => ({
           path: f.path,
-          content_base64: btoa(String.fromCharCode(...new Uint8Array(f.content))),
+          // [fix 2026-10-08] 分块转换：spread 在大文件（约 >64KB）会因参数个数超限抛 RangeError
+          content_base64: u8ToBase64(new Uint8Array(f.content)),
           size: f.size,
           persistent: f.persistent
         })));

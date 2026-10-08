@@ -6,7 +6,7 @@
 // (synced from apishare b4caac0) — bare URLs hit the browser's long static
 // cache and can run a stale pre-saveFiles agent-storage.js. Keep in sync
 // with agent-engine.js._AGENT_VER.
-const _AGENT_VER = '20261008a';
+const _AGENT_VER = '20261008e';
 
 const AgentToolsWasm = {
   async execute(toolName, args, ctx) {

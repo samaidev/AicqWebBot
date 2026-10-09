@@ -2223,10 +2223,11 @@ const AgentToolsNative = {
       return { success: false, error: 'Unsupported image source. Use "latest" (omit), an http(s) URL, or a data:image/... data URI. Got: ' + src.slice(0, 60) };
     }
 
-    // 2. 大图降采样（>2MB base64 → 最长边 1600px JPEG，避免请求体过大）
-    if (dataUrl.length > 2 * 1024 * 1024) {
-      dataUrl = await this._analyzeDownscale(dataUrl, 1600);
-    }
+    // 2. [r32 2026-10-09] 自动压缩到安全体积再发 —— 上游免费网关（agnes 等）
+    //    nginx client_max_body_size 1m：实测 data-URL base64 ≤1019KB 过、
+    //    ≥1087KB 必 413（用户报的"43错误"）。旧口径 >2MB 才压一次，
+    //    漏掉 1-2MB 区间且单次 1600px 压完仍可能超限 → 迭代压缩到 ≤800KB。
+    dataUrl = await this._analyzeFitForUpload(dataUrl);
 
     // 3. 提问
     const question = String((args && args.question) || '').trim() ||
@@ -2285,23 +2286,54 @@ const AgentToolsNative = {
     });
   },
 
-  // Canvas 降采样：最长边 ≤ maxDim，输出 JPEG（失败原样返回）
-  async _analyzeDownscale(dataUrl, maxDim) {
+  // [r32 2026-10-09] 视觉请求安全压缩（替代旧 _analyzeDownscale 单次降采样）：
+  // 所有进 LLM 的图片先压到 ≤_VISION_UPLOAD_MAX base64 再发。
+  // 依据：agnes 上游（apihub.agnes-ai.com）nginx 1m 体限制 —— 实测
+  // base64 ≤1019KB HTTP 200、≥1087KB HTTP 413（2026-10-09，apishare.cc/v1
+  // Agnes/agnes-3.0-flash:free 实测）。迭代降采样（1600→1280→1024→800→640px
+  // × 质量 0.85/0.75/0.6）直到进预算；透明 PNG 先铺白底再压 JPEG（防黑块）。
+  // 失败原样返回 —— 预处理绝不打断工具。
+  _VISION_UPLOAD_MAX: 800 * 1024,
+
+  async _analyzeFitForUpload(dataUrl) {
     try {
+      dataUrl = String(dataUrl || '');
+      const maxBytes = this._VISION_UPLOAD_MAX;
+      if (!dataUrl || !/^data:image\//i.test(dataUrl)) return dataUrl;
       const img = await new Promise((res, rej) => {
         const i = new Image();
         i.onload = () => res(i);
         i.onerror = () => rej(new Error('img load'));
         i.src = dataUrl;
       });
-      const scale = Math.min(1, maxDim / Math.max(img.width, img.height));
-      if (scale >= 1) return dataUrl;
-      const c = document.createElement('canvas');
-      c.width = Math.max(1, Math.round(img.width * scale));
-      c.height = Math.max(1, Math.round(img.height * scale));
-      c.getContext('2d').drawImage(img, 0, 0, c.width, c.height);
-      const out = c.toDataURL('image/jpeg', 0.85);
-      return (out && out.length < dataUrl.length) ? out : dataUrl;
+      const iw = img.naturalWidth || img.width || 0;
+      const ih = img.naturalHeight || img.height || 0;
+      const maxEdge = Math.max(iw, ih);
+      // 体积和边长双达标 → 原样返回（常规截图/小图零开销路径）
+      if (dataUrl.length <= maxBytes && maxEdge > 0 && maxEdge <= 2048) return dataUrl;
+      const steps = [1600, 1280, 1024, 800, 640];
+      const qualities = [0.85, 0.75, 0.6];
+      let best = dataUrl;
+      for (const dim of steps) {
+        const sw = iw || dim, sh = ih || dim;
+        const scale = Math.min(1, dim / Math.max(sw, sh));
+        const c = document.createElement('canvas');
+        c.width = Math.max(1, Math.round(sw * scale));
+        c.height = Math.max(1, Math.round(sh * scale));
+        const cx = c.getContext('2d');
+        if (cx) {
+          // JPEG 无 alpha 通道：先铺白底，防透明 PNG 压完变黑块
+          cx.fillStyle = '#ffffff';
+          cx.fillRect(0, 0, c.width, c.height);
+          cx.drawImage(img, 0, 0, c.width, c.height);
+        }
+        for (const q of qualities) {
+          const out = c.toDataURL('image/jpeg', q);
+          if (out && out.length > 4 && out.length < best.length) best = out;
+          if (best.length <= maxBytes) return best;
+        }
+      }
+      return best; // 极端大图尽力而为：返回压到的最小一版
     } catch (e) { return dataUrl; }
   },
 

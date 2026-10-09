@@ -3,7 +3,7 @@
    ═════════════════════════════════════════════════════ */
 
 // Cache-buster version for dynamic imports — bump when agent modules change
-const _AGENT_VER = '20261008e';
+const _AGENT_VER = '20261009a';
 function _agUrl(name) { return `/static/agent/${name}?v=${_AGENT_VER}`; }
 
 // [ADD 2026-10-07 single-instance guard] (synced from apishare.cc 24a4e9f)
@@ -596,11 +596,21 @@ const AgentEngine = {
             }
           } catch (e) { console.warn('[AgentEngine] Image download for analyze-image failed:', e); }
         }
+        // [r32 2026-10-09] LLM 侧图片统一走安全压缩版 _analyzeFitForUpload
+        // （上游免费网关 nginx 1MB 体限制，实测 base64 ≥1.1MB 必 413，用户报的
+        // "43错误"）：内联 vision 与 analyze-image 槽位用压缩版 _imgLLMUrl，
+        // 原图 _imgDataUrl 仍供下方 FS 持久化与气泡重放。
+        let _imgLLMUrl = _imgDataUrl;
         if (_imgDataUrl) {
           try {
             const { AgentToolsNative: _ATN } = await import(_agUrl('agent-tools-native.js'));
-            _ATN.rememberImage(sessionId, _imgDataUrl);
-            console.log('[AgentEngine] Image stored for analyze-image, len=' + _imgDataUrl.length);
+            const _fitted = await _ATN._analyzeFitForUpload(_imgDataUrl);
+            if (_fitted && _fitted.length < _imgDataUrl.length) {
+              console.log('[AgentEngine] Image fitted for LLM: ' + _imgDataUrl.length + ' -> ' + _fitted.length);
+              _imgLLMUrl = _fitted;
+            }
+            _ATN.rememberImage(sessionId, _imgLLMUrl);
+            console.log('[AgentEngine] Image stored for analyze-image, len=' + _imgLLMUrl.length);
           } catch (e) { console.warn('[AgentEngine] rememberImage failed:', e); }
         }
         // [ADD 2026-10-06] remember where the image bytes live so the chat
@@ -630,12 +640,13 @@ const AgentEngine = {
             console.log('[AgentEngine] relay image persisted to FS: ' + _p);
           } catch (e) { console.warn('[AgentEngine] relay image FS persist failed:', e); }
         }
-        // 2) 主模型 payload：BYOK 模型是否支持视觉由用户自选（vision 模型内联）。
+        // 2) 主模型 payload：BYOK 模型是否支持视觉由用户自选（vision 模型内联，
+        //    [r32] 用压缩版 _imgLLMUrl，防大图 413）。
         //    不支持视觉的模型会报错 → 用户可在设置里换模型，或让 agent 调 analyze-image 工具。
-        if (_imgDataUrl) {
+        if (_imgLLMUrl) {
           userMessageContent = [
             { type: 'text', text: userMessage || 'What do you see in this image?' },
-            { type: 'image_url', image_url: { url: _imgDataUrl } }
+            { type: 'image_url', image_url: { url: _imgLLMUrl } }
           ];
         }
         if (!userMessage || !userMessage.trim()) userMessage = '[Image]';

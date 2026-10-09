@@ -3,7 +3,7 @@
    ═════════════════════════════════════════════════════ */
 
 // Cache-buster version for dynamic imports — bump when agent modules change
-const _AGENT_VER = '20261009a';
+const _AGENT_VER = '20261009b';
 function _agUrl(name) { return `/static/agent/${name}?v=${_AGENT_VER}`; }
 
 // [ADD 2026-10-07 single-instance guard] (synced from apishare.cc 24a4e9f)

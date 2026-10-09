@@ -2253,7 +2253,15 @@ const AgentToolsNative = {
     }
     for (const vcfg of chain) {
       const isByok = vcfg.provider !== 'opencode';
-      const r = await this._visionDescribe(vcfg, dataUrl, question, ctx);
+      // [r32b 2026-10-09] 单模型网络异常不得杀死整个工具：opencode 链在
+      // aicq 中继下出现过 401 后连接中断（resp.text() 抛 TypeError），
+      // 不捕获的话后续模型 / BYOK 兑底全部跳过 —— 捕获后计入 errors 继续。
+      let r;
+      try {
+        r = await this._visionDescribe(vcfg, dataUrl, question, ctx);
+      } catch (e) {
+        r = { success: false, error: 'network: ' + String((e && e.message) || e).slice(0, 120) };
+      }
       if (r.success) {
         if (!isByok) { try { localStorage.setItem(CACHE_KEY, vcfg.model); } catch (e) {} }
         return { success: true, output: r.output, model: vcfg.model + (isByok ? ' (your model)' : ' (free)') };
